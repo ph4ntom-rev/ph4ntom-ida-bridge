@@ -33,7 +33,7 @@ import ida_entry
 import ida_idaapi
 import ida_auto
 import ida_lines
-import ida_xref
+import ida_xref  # noqa: F401
 import ida_typeinf
 try:
     import ida_range
@@ -74,7 +74,7 @@ def safe_read(func):
     def wrapper():
         try:
             result[0] = func()
-        except Exception as e:
+        except Exception:
             error[0] = traceback.format_exc()
     ida_kernwin.execute_sync(wrapper, ida_kernwin.MFF_READ)
     if error[0]:
@@ -88,7 +88,7 @@ def safe_write(func):
     def wrapper():
         try:
             result[0] = func()
-        except Exception as e:
+        except Exception:
             error[0] = traceback.format_exc()
     ida_kernwin.execute_sync(wrapper, ida_kernwin.MFF_WRITE)
     if error[0]:
@@ -648,8 +648,6 @@ def rename_local_var(func_ea, old_name, new_name):
 def create_struct(c_definition):
     """Create a structure from C syntax."""
     def _inner():
-        til = ida_typeinf.get_idati()
-        errors = None
         try:
             count = idc.parse_decls(c_definition, idc.PT_TYP)
         except Exception as e:
@@ -806,7 +804,6 @@ def get_switch_info(ea):
         if not si:
             return {"error": f"No switch at {hex(ea)}"}
         cases = []
-        results = idc.get_switch_info(ea)
         jt = si.jumps
         ncases = si.get_jtable_size()
         for i in range(ncases):
@@ -862,8 +859,8 @@ def get_global_vars(max_count=500):
     """Get global variables (named data items)."""
     def _inner():
         import ida_ida
-        min_ea = ida_ida.inf_get_min_ea() if hasattr(ida_ida, 'inf_get_min_ea') else 0
-        max_ea = ida_ida.inf_get_max_ea() if hasattr(ida_ida, 'inf_get_max_ea') else 0xFFFFFFFF
+        min_ea = ida_ida.inf_get_min_ea() if hasattr(ida_ida, 'inf_get_min_ea') else 0  # noqa: F841
+        max_ea = ida_ida.inf_get_max_ea() if hasattr(ida_ida, 'inf_get_max_ea') else 0xFFFFFFFF  # noqa: F841
         gvars = []
         count = 0
         for ea, name in idautils.Names():
@@ -1140,7 +1137,7 @@ def execute_dynamic_python(script_code):
                 try: ida_auto.auto_mark_range(0, ida_idaapi.BADADDR, ida_auto.AU_USED)
                 except Exception: pass
             exec(script_code, globals(), local_vars)
-        except Exception as e:
+        except Exception:
             success = False
             error_msg = traceback.format_exc()
         finally:
@@ -1218,7 +1215,7 @@ def set_lvar_comment_api(func_ea, var_name, cmt):
     if not HAS_HEXRAYS: return {"error": "Hex-Rays not available"}
     def _inner():
         try: cfunc = ida_hexrays.decompile(func_ea)
-        except: return {"error": f"Decompile failed"}
+        except Exception: return {"error": "Decompile failed"}
         if not cfunc: return {"error": "None"}
         for lv in cfunc.lvars:
             if lv.name == var_name:
@@ -1406,13 +1403,13 @@ def get_code_xrefs(ea):
 
 def _dbg_available():
     try:
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         return True
     except: return False
 
 def dbg_start_process(path=None, args="", sdir=None):
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         p = path if path else ida_nalt.get_input_file_path()
         ok = ida_dbg.start_process(p, args, sdir or "")
         return {"success":ok==1,"path":p}
@@ -1420,21 +1417,21 @@ def dbg_start_process(path=None, args="", sdir=None):
 
 def dbg_attach_process(pid):
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         ok = ida_dbg.attach_process(pid, -1)
         return {"success":ok==1,"pid":pid}
     return safe_write(_inner)
 
 def dbg_detach():
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         ok = ida_dbg.detach_process()
         return {"success":ok}
     return safe_write(_inner)
 
 def dbg_set_bp(ea, is_hw=False):
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         if is_hw: ok = ida_dbg.add_bpt(ea, 1, ida_dbg.BPT_DEFAULT)
         else: ok = ida_dbg.add_bpt(ea)
         return {"success":ok,"ea":hex(ea),"hardware":is_hw}
@@ -1442,14 +1439,14 @@ def dbg_set_bp(ea, is_hw=False):
 
 def dbg_del_bp(ea):
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         ok = ida_dbg.del_bpt(ea)
         return {"success":ok,"ea":hex(ea)}
     return safe_write(_inner)
 
 def dbg_list_bps():
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         bps = []
         for i in range(ida_dbg.get_bpt_qty()):
             bp = ida_dbg.bpt_t()
@@ -1460,35 +1457,36 @@ def dbg_list_bps():
 
 def dbg_step_into_api():
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         ok = ida_dbg.step_into()
         return {"success":ok}
     return safe_write(_inner)
 
 def dbg_step_over_api():
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         ok = ida_dbg.step_over()
         return {"success":ok}
     return safe_write(_inner)
 
 def dbg_continue_api():
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         ok = ida_dbg.continue_process()
         return {"success":ok}
     return safe_write(_inner)
 
 def dbg_pause_api():
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         ok = ida_dbg.suspend_process()
         return {"success":ok}
     return safe_write(_inner)
 
 def dbg_get_regs():
     def _inner():
-        import ida_dbg, ida_idd
+        import ida_dbg  # noqa: F401
+        import ida_idd  # noqa: F401
         regs = {}
         rv = ida_idd.regval_t()
         for name in ["rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15","rip","eflags",
@@ -1501,7 +1499,7 @@ def dbg_get_regs():
 
 def dbg_read_mem(ea, size):
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         data = ida_dbg.dbg_read_memory(ea, size)
         if not data: return {"error":f"Cannot read {size} bytes at {hex(ea)}"}
         return {"ea":hex(ea),"size":size,"hex":' '.join(f'{b:02X}' for b in data)}
@@ -1509,7 +1507,7 @@ def dbg_read_mem(ea, size):
 
 def dbg_write_mem(ea, hex_bytes):
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         data = bytes.fromhex(hex_bytes.replace(' ',''))
         ok = ida_dbg.dbg_write_memory(ea, data)
         return {"success":ok>0,"ea":hex(ea),"size":len(data)}
@@ -1517,7 +1515,7 @@ def dbg_write_mem(ea, hex_bytes):
 
 def dbg_get_threads():
     def _inner():
-        import ida_dbg
+        import ida_dbg  # noqa: F401
         threads = []
         for i in range(ida_dbg.get_thread_qty()):
             tid = ida_dbg.getn_thread(i)
@@ -1528,7 +1526,8 @@ def dbg_get_threads():
 
 def dbg_get_stack():
     def _inner():
-        import ida_dbg, ida_idd
+        import ida_dbg  # noqa: F401
+        import ida_idd  # noqa: F401
         trace = ida_dbg.call_stack_t()
         ok = ida_dbg.get_call_stack(trace)
         if not ok: return {"error":"Cannot get call stack"}
@@ -1698,7 +1697,7 @@ class AntigravityUIHooks(ida_kernwin.UI_Hooks):
         return 0
 
 try:
-    import ida_dbg
+    import ida_dbg  # noqa: F401
     class AntigravityDbgHooks(ida_dbg.DbgHooks):
         def dbg_bpt(self, tid, ea):
             sse_queue.put({"event": "breakpoint_hit", "tid": tid, "ea": hex(ea)})
@@ -2364,7 +2363,7 @@ def start_server(host=HOST, port=PORT):
     print(f"[Antigravity] ✅ Bridge server started on http://{host}:{port}")
     print(f"[Antigravity] 🔑 Auth token: {AUTH_TOKEN}")
     print(f"[Antigravity] 🔑 Token file: {_token_path}")
-    print(f"[Antigravity] Endpoints: /api/info, /api/functions, /api/function/<ea>/pseudocode, ...")
+    print("[Antigravity] Endpoints: /api/info, /api/functions, /api/function/<ea>/pseudocode, ...")
     ida_kernwin.msg(f"[Antigravity] Bridge server started on http://{host}:{port}\n")
 
 def stop_server():
@@ -2396,7 +2395,7 @@ class AntigravityPlugin(ida_idaapi.plugin_t):
         return ida_idaapi.PLUGIN_KEEP
 
     def run(self, arg):
-        global _server
+        global _server  # noqa: F824
         if _server is None:
             start_server()
         else:
