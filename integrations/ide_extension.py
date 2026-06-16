@@ -17,7 +17,7 @@ Can run as:
 
 import os
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler  # noqa: F401
 from core.client import BridgeClient
 
 
