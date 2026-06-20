@@ -17,7 +17,6 @@ Can run as:
 
 import os
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from core.client import BridgeClient
 
 
@@ -137,13 +136,13 @@ def generate_ide_configs(workspace: str = "."):
     vscode_dir = os.path.join(workspace, ".vscode")
     os.makedirs(vscode_dir, exist_ok=True)
     vscode_settings_path = os.path.join(vscode_dir, "settings.json")
-    
+
     if os.path.exists(vscode_settings_path):
         with open(vscode_settings_path, "r") as f:
             settings = json.load(f)
     else:
         settings = {}
-    
+
     settings.update(VSCODE_SETTINGS)
     with open(vscode_settings_path, "w") as f:
         json.dump(settings, f, indent=2)
