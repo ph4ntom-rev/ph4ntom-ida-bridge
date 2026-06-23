@@ -17,7 +17,7 @@ Can run as:
 
 import os
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler  # noqa: F401
 from core.client import BridgeClient
 
 
@@ -50,7 +50,8 @@ class IDEBridge:
 
     def _load_config(self) -> dict:
         """Load config from workspace .antigravity/config.json"""
-        config_path = os.path.join(self.workspace, ".antigravity", "config.json")
+        config_path = os.path.join(
+            self.workspace, ".antigravity", "config.json")
         if os.path.exists(config_path):
             with open(config_path, "r") as f:
                 user_config = json.load(f)
@@ -89,7 +90,10 @@ class IDEBridge:
 
     def get_functions(self, offset: int = 0, limit: int = 100) -> dict:
         """Get function list for IDE panel."""
-        return self.client.get("/api/functions-page", offset=offset, limit=limit)
+        return self.client.get(
+            "/api/functions-page",
+            offset=offset,
+            limit=limit)
 
     def get_decompilation(self, ea: str) -> dict:
         """Get decompiled pseudocode for IDE editor."""
@@ -105,7 +109,8 @@ class IDEBridge:
 
     def set_comment(self, ea: str, comment: str) -> dict:
         """Sync comment from IDE to IDA."""
-        return self.client.post(f"/api/function/{ea}/comment", {"comment": comment})
+        return self.client.post(
+            f"/api/function/{ea}/comment", {"comment": comment})
 
 
 # ── VS Code / Antigravity IDE settings templates ─────────────────────────
@@ -137,13 +142,13 @@ def generate_ide_configs(workspace: str = "."):
     vscode_dir = os.path.join(workspace, ".vscode")
     os.makedirs(vscode_dir, exist_ok=True)
     vscode_settings_path = os.path.join(vscode_dir, "settings.json")
-    
+
     if os.path.exists(vscode_settings_path):
         with open(vscode_settings_path, "r") as f:
             settings = json.load(f)
     else:
         settings = {}
-    
+
     settings.update(VSCODE_SETTINGS)
     with open(vscode_settings_path, "w") as f:
         json.dump(settings, f, indent=2)

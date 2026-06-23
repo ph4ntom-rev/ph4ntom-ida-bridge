@@ -31,7 +31,8 @@ class BridgeClient:
     """Thread-safe HTTP client for the Antigravity IDA Bridge."""
 
     def __init__(self, url: Optional[str] = None, timeout: int = 30):
-        raw_url = url or os.environ.get("IDA_BRIDGE_URL", "http://127.0.0.1:13370")
+        raw_url = url or os.environ.get(
+            "IDA_BRIDGE_URL", "http://127.0.0.1:13370")
         self.base_url = raw_url.rstrip("/")
         self.timeout = timeout
         self.session = self._build_session()
@@ -47,7 +48,10 @@ class BridgeClient:
             backoff_factor=0.3,
             status_forcelist=[429, 500, 502, 503, 504],
         )
-        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry_strategy)
+        adapter = HTTPAdapter(
+            pool_connections=20,
+            pool_maxsize=20,
+            max_retries=retry_strategy)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         return session
@@ -85,18 +89,31 @@ class BridgeClient:
             return {"success": True, "data": None}
 
         except requests.ConnectionError:
-            return {"error": f"IDA Bridge offline at {self.base_url}", "success": False}
+            return {
+                "error": f"IDA Bridge offline at {
+                    self.base_url}",
+                "success": False}
         except JSONDecodeError:
-            return {"error": f"Invalid JSON response from server (HTTP {response.status_code})", "success": False}
+            return {
+                "error": f"Invalid JSON response from server (HTTP {
+                    response.status_code})",
+                "success": False}
         except requests.exceptions.HTTPError as e:
             try:
-                return {"error": response.json().get("error", str(e)), "success": False}
+                return {
+                    "error": response.json().get(
+                        "error",
+                        str(e)),
+                    "success": False}
             except (ValueError, JSONDecodeError):
-                return {"error": f"HTTP {response.status_code}: {response.text[:200]}", "success": False}
+                return {
+                    "error": f"HTTP {response.status_code}: {response.text[:200]}", "success": False}
         except requests.exceptions.Timeout:
             return {"error": "Request timed out", "success": False}
         except RequestException as e:
-            return {"error": f"HTTP request failed: {str(e)}", "success": False}
+            return {
+                "error": f"HTTP request failed: {
+                    str(e)}", "success": False}
         except Exception as e:
             return {"error": f"Unexpected error: {str(e)}", "success": False}
 
@@ -104,7 +121,8 @@ class BridgeClient:
         """GET request to bridge. Returns parsed JSON."""
         return self._request("GET", path, params=params)
 
-    def post(self, path: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def post(self, path: str,
+             data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """POST request to bridge. Returns parsed JSON."""
         return self._request("POST", path, json=data or {})
 
@@ -130,7 +148,10 @@ class BridgeClient:
         """Alias for decompile()."""
         return self.decompile(ea)
 
-    def functions(self, limit: Optional[int] = None, offset: int = 0) -> Dict[str, Any]:
+    def functions(self,
+                  limit: Optional[int] = None,
+                  offset: int = 0) -> Dict[str,
+                                           Any]:
         """List functions with optional pagination."""
         if limit:
             return self.get("/api/functions-page", offset=offset, limit=limit)
@@ -152,7 +173,8 @@ class BridgeClient:
         """Rename function at address."""
         return self.post(f"/api/function/{ea}/rename", {"name": name})
 
-    def call_api(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def call_api(self, method: str, path: str,
+                 payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Generic API call supporting arbitrary HTTP methods."""
         method = method.upper()
         if method == "GET":

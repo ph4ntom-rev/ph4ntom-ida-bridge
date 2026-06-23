@@ -62,8 +62,7 @@ class SchemaLoader:
         if not self.schema:
             return (
                 "You are an expert reverse engineering AI agent connected to IDA Pro "
-                "via the Antigravity Bridge API. Use the available tools to analyze binaries."
-            )
+                "via the Antigravity Bridge API. Use the available tools to analyze binaries.")
 
         parts = []
 
@@ -73,7 +72,8 @@ class SchemaLoader:
 
         # Endpoints reference
         if endpoints := self.schema.get("endpoints"):
-            parts.extend(["## Available API Endpoints\n", json.dumps(endpoints, indent=1)])
+            parts.extend(["## Available API Endpoints\n",
+                         json.dumps(endpoints, indent=1)])
 
         # Workflows
         if workflows := self.schema.get("workflows"):
