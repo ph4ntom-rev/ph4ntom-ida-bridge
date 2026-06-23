@@ -22,15 +22,19 @@ from google.genai import types
 
 from core.client import BridgeClient
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s")
 
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
 
 class FunctionAnalysis(BaseModel):
-    suggested_name: str = Field(description="Descriptive CamelCase/snake_case name. No 'sub_'")
-    comment: str = Field(description="Concise technical explanation of the logic")
+    suggested_name: str = Field(
+        description="Descriptive CamelCase/snake_case name. No 'sub_'")
+    comment: str = Field(
+        description="Concise technical explanation of the logic")
 
 
 def analyze_with_backoff(client, ea: str, pseudocode: str, retries: int = 4):
@@ -53,7 +57,8 @@ def analyze_with_backoff(client, ea: str, pseudocode: str, retries: int = 4):
             err_str = str(e).lower()
             if "429" in err_str or "quota" in err_str or "exhausted" in err_str:
                 wait_time = 2 ** attempt
-                logging.warning(f"[Rate Limit] Retrying {ea} in {wait_time}s...")
+                logging.warning(
+                    f"[Rate Limit] Retrying {ea} in {wait_time}s...")
                 time.sleep(wait_time)
             else:
                 logging.error(f"Gemini API error for {ea}: {e}")
@@ -67,7 +72,9 @@ def process_batch(bridge: BridgeClient, functions: list, max_workers: int = 5):
         return
 
     genai_client = genai.Client(api_key=API_KEY)
-    logging.info(f"Processing {len(functions)} functions with {max_workers} threads...")
+    logging.info(
+        f"Processing {
+            len(functions)} functions with {max_workers} threads...")
     mutations = []
 
     def worker(func_info):
@@ -82,7 +89,8 @@ def process_batch(bridge: BridgeClient, functions: list, max_workers: int = 5):
             return None
 
         analysis = analyze_with_backoff(genai_client, ea, code)
-        if analysis and analysis.get("suggested_name") and not analysis["suggested_name"].startswith("sub_"):
+        if analysis and analysis.get(
+                "suggested_name") and not analysis["suggested_name"].startswith("sub_"):
             return {
                 "ea": ea, "old_name": name,
                 "new_name": analysis["suggested_name"],
@@ -123,7 +131,10 @@ def main():
         logging.error(f"Bridge error: {res['error']}")
         return
 
-    unnamed = [f for f in res.get("functions", []) if f["name"].startswith("sub_")]
+    unnamed = [
+        f for f in res.get(
+            "functions",
+            []) if f["name"].startswith("sub_")]
     if unnamed:
         process_batch(bridge, unnamed[:args.limit], max_workers=args.workers)
     else:

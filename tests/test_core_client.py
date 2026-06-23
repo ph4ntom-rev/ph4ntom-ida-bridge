@@ -23,7 +23,8 @@ class TestBridgeClient:
         response = client.get("/api/test")
 
         assert response == {"success": True, "data": "test"}
-        mock_request.assert_called_once_with('GET', 'http://127.0.0.1:13370/api/test', params={}, timeout=30)
+        mock_request.assert_called_once_with(
+            'GET', 'http://127.0.0.1:13370/api/test', params={}, timeout=30)
 
     @patch('core.client.requests.Session.request')
     def test_post_success(self, mock_request):
@@ -37,12 +38,18 @@ class TestBridgeClient:
         response = client.post("/api/test", data={"key": "value"})
 
         assert response == {"success": True}
-        mock_request.assert_called_once_with('POST', 'http://127.0.0.1:13370/api/test', json={"key": "value"}, timeout=30)
+        mock_request.assert_called_once_with(
+            'POST',
+            'http://127.0.0.1:13370/api/test',
+            json={
+                "key": "value"},
+            timeout=30)
 
     @patch('core.client.requests.Session.request')
     def test_request_connection_error(self, mock_request):
         import requests
-        mock_request.side_effect = requests.ConnectionError("Connection Refused")
+        mock_request.side_effect = requests.ConnectionError(
+            "Connection Refused")
 
         client = BridgeClient()
         response = client.get("/api/test")
