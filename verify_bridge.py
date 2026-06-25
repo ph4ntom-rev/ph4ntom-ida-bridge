@@ -1,7 +1,7 @@
-import os
+
 import sys
 import json
-from pathlib import Path
+
 from core.client import BridgeClient
 
 def main():
