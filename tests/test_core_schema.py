@@ -1,5 +1,6 @@
 from core.schema import SchemaLoader
 
+
 class TestSchemaLoader:
     def test_init_default(self):
         loader = SchemaLoader()
@@ -10,7 +11,6 @@ class TestSchemaLoader:
         loader = SchemaLoader(schema_path="/invalid/path/to/schema.json")
         assert loader.schema == {}
         assert loader.is_loaded is False
-
 
     def test_load_schema_invalid_json(self, tmp_path):
         bad_json_file = tmp_path / "bad_schema.json"
