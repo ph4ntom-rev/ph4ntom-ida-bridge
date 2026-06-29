@@ -25,8 +25,12 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 # IDA imports
-import ida_kernwin, ida_funcs, ida_name, ida_bytes, ida_segment
-import ida_nalt, ida_entry, ida_idaapi, ida_auto, ida_lines, ida_typeinf
+import ida_kernwin, ida_funcs, ida_name
+import ida_bytes  # noqa: F401
+import ida_segment  # noqa: F401
+import ida_nalt, ida_idaapi, ida_auto, ida_lines
+import ida_entry  # noqa: F401
+import ida_typeinf  # noqa: F401
 import idautils, idc
 
 try:
