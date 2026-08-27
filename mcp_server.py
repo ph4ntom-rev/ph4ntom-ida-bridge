@@ -1,7 +1,7 @@
 """
-Antigravity IDA Bridge — MCP Server (Upgraded & Integrated)
-============================================================
-Model Context Protocol server that exposes 50+ IDA Pro capabilities
+Antigravity IDA Bridge — MCP Server
+====================================
+Model Context Protocol server that exposes 54 IDA Pro tools
 to any MCP-compatible AI client (Claude Desktop, Cursor, Cline, etc.)
 
 Uses the shared BridgeClient for thread-safety, connection pooling,
@@ -9,6 +9,8 @@ bearer token authentication, and robust exponential backoff.
 """
 
 import json
+from typing import Optional
+
 from fastmcp import FastMCP
 from core.client import BridgeClient
 
@@ -18,9 +20,13 @@ def _get(path: str, **params) -> dict:
     """GET request via BridgeClient."""
     return client.call_api("GET", path, params)
 
-def _post(path: str, data: dict = None) -> dict:
+def _post(path: str, data: Optional[dict] = None) -> dict:
     """POST request via BridgeClient."""
     return client.call_api("POST", path, data)
+
+
+def _component(value: object) -> str:
+    return client.path_component(value)
 
 # ─── MCP Server ──────────────────────────────────────────────────────────────
 
@@ -67,7 +73,7 @@ def decompile(ea: str) -> str:
     Args:
         ea: Function address as hex string (e.g. '0x140001000')
     """
-    return json.dumps(_get(f"/api/function/{ea}/pseudocode"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/pseudocode"), indent=2)
 
 @mcp.tool
 def get_disassembly(ea: str) -> str:
@@ -76,7 +82,7 @@ def get_disassembly(ea: str) -> str:
     Args:
         ea: Function address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/disasm"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/disasm"), indent=2)
 
 @mcp.tool
 def get_ctree(ea: str) -> str:
@@ -86,7 +92,7 @@ def get_ctree(ea: str) -> str:
     Args:
         ea: Function address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/ctree"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/ctree"), indent=2)
 
 @mcp.tool
 def get_microcode(ea: str, maturity: int = 7) -> str:
@@ -97,7 +103,7 @@ def get_microcode(ea: str, maturity: int = 7) -> str:
         ea: Function address as hex string
         maturity: Optimization level 0-7 (default 7)
     """
-    return json.dumps(_get(f"/api/function/{ea}/microcode", maturity=maturity), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/microcode", maturity=maturity), indent=2)
 
 @mcp.tool
 def get_local_variables(ea: str) -> str:
@@ -106,7 +112,7 @@ def get_local_variables(ea: str) -> str:
     Args:
         ea: Function address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/lvar-map"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/lvar-map"), indent=2)
 
 @mcp.tool
 def get_function_details(ea: str) -> str:
@@ -115,7 +121,7 @@ def get_function_details(ea: str) -> str:
     Args:
         ea: Function address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/details"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/details"), indent=2)
 
 # ─── Cross-References & Navigation ──────────────────────────────────────────
 
@@ -126,7 +132,7 @@ def get_xrefs_to(ea: str) -> str:
     Args:
         ea: Target address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/xrefs-to"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/xrefs-to"), indent=2)
 
 @mcp.tool
 def get_xrefs_from(ea: str) -> str:
@@ -135,7 +141,7 @@ def get_xrefs_from(ea: str) -> str:
     Args:
         ea: Function address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/xrefs-from"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/xrefs-from"), indent=2)
 
 @mcp.tool
 def get_callers(ea: str) -> str:
@@ -144,7 +150,7 @@ def get_callers(ea: str) -> str:
     Args:
         ea: Function address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/callers"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/callers"), indent=2)
 
 @mcp.tool
 def get_callees(ea: str) -> str:
@@ -153,7 +159,7 @@ def get_callees(ea: str) -> str:
     Args:
         ea: Function address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/callees"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/callees"), indent=2)
 
 @mcp.tool
 def get_call_graph(ea: str, depth: int = 3) -> str:
@@ -163,7 +169,7 @@ def get_call_graph(ea: str, depth: int = 3) -> str:
         ea: Root function address
         depth: Recursion depth (default 3)
     """
-    return json.dumps(_get(f"/api/function/{ea}/call-graph", depth=depth), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/call-graph", depth=depth), indent=2)
 
 @mcp.tool
 def get_basic_blocks(ea: str) -> str:
@@ -172,7 +178,7 @@ def get_basic_blocks(ea: str) -> str:
     Args:
         ea: Function address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/basic-blocks"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/basic-blocks"), indent=2)
 
 @mcp.tool
 def get_strings_used(ea: str) -> str:
@@ -181,7 +187,7 @@ def get_strings_used(ea: str) -> str:
     Args:
         ea: Function address as hex string
     """
-    return json.dumps(_get(f"/api/function/{ea}/strings-used"), indent=2)
+    return json.dumps(_get(f"/api/function/{_component(ea)}/strings-used"), indent=2)
 
 # ─── Search Tools ────────────────────────────────────────────────────────────
 
@@ -192,7 +198,7 @@ def search_function(name: str) -> str:
     Args:
         name: Search query (partial function name)
     """
-    return json.dumps(_get(f"/api/search-func/{name}"), indent=2)
+    return json.dumps(_get(f"/api/search-func/{_component(name)}"), indent=2)
 
 @mcp.tool
 def search_bytes(pattern: str) -> str:
@@ -202,7 +208,7 @@ def search_bytes(pattern: str) -> str:
     Args:
         pattern: Hex byte pattern with optional ?? wildcards
     """
-    return json.dumps(_get(f"/api/search-bytes/{pattern}"), indent=2)
+    return json.dumps(_get(f"/api/search-bytes/{_component(pattern)}"), indent=2)
 
 @mcp.tool
 def search_text(text: str) -> str:
@@ -211,7 +217,7 @@ def search_text(text: str) -> str:
     Args:
         text: Text to search for
     """
-    return json.dumps(_get(f"/api/search-text/{text}"), indent=2)
+    return json.dumps(_get(f"/api/search-text/{_component(text)}"), indent=2)
 
 @mcp.tool
 def list_strings() -> str:
@@ -248,7 +254,7 @@ def read_bytes(ea: str, size: int) -> str:
         ea: Start address as hex string
         size: Number of bytes to read
     """
-    return json.dumps(_get(f"/api/bytes/{ea}/{size}"), indent=2)
+    return json.dumps(_get(f"/api/bytes/{_component(ea)}/{size}"), indent=2)
 
 @mcp.tool
 def read_vtable(ea: str) -> str:
@@ -257,7 +263,7 @@ def read_vtable(ea: str) -> str:
     Args:
         ea: Vtable start address
     """
-    return json.dumps(_get(f"/api/vtable/{ea}"), indent=2)
+    return json.dumps(_get(f"/api/vtable/{_component(ea)}"), indent=2)
 
 # ─── Type System ─────────────────────────────────────────────────────────────
 
@@ -273,7 +279,7 @@ def get_struct(name: str) -> str:
     Args:
         name: Structure name
     """
-    return json.dumps(_get(f"/api/struct/{name}"), indent=2)
+    return json.dumps(_get(f"/api/struct/{_component(name)}"), indent=2)
 
 @mcp.tool
 def list_enums() -> str:
@@ -292,7 +298,7 @@ def get_type(name: str) -> str:
     Args:
         name: Type name
     """
-    return json.dumps(_get(f"/api/type/{name}"), indent=2)
+    return json.dumps(_get(f"/api/type/{_component(name)}"), indent=2)
 
 @mcp.tool
 def create_type(definition: str) -> str:
@@ -313,7 +319,7 @@ def rename_function(ea: str, name: str) -> str:
         ea: Function address as hex string
         name: New function name
     """
-    return json.dumps(_post(f"/api/function/{ea}/rename", {"name": name}))
+    return json.dumps(_post(f"/api/function/{_component(ea)}/rename", {"name": name}))
 
 @mcp.tool
 def comment_function(ea: str, comment: str) -> str:
@@ -323,7 +329,7 @@ def comment_function(ea: str, comment: str) -> str:
         ea: Function address as hex string
         comment: Comment text
     """
-    return json.dumps(_post(f"/api/function/{ea}/comment", {"comment": comment}))
+    return json.dumps(_post(f"/api/function/{_component(ea)}/comment", {"comment": comment}))
 
 @mcp.tool
 def set_inline_comment(ea: str, comment: str) -> str:
@@ -333,7 +339,7 @@ def set_inline_comment(ea: str, comment: str) -> str:
         ea: Address as hex string
         comment: Comment text
     """
-    return json.dumps(_post(f"/api/address/{ea}/comment", {"comment": comment}))
+    return json.dumps(_post(f"/api/address/{_component(ea)}/comment", {"comment": comment}))
 
 @mcp.tool
 def rename_variable(ea: str, old_name: str, new_name: str) -> str:
@@ -344,7 +350,7 @@ def rename_variable(ea: str, old_name: str, new_name: str) -> str:
         old_name: Current variable name
         new_name: New variable name
     """
-    return json.dumps(_post(f"/api/function/{ea}/lvar-rename", {"old": old_name, "new": new_name}))
+    return json.dumps(_post(f"/api/function/{_component(ea)}/lvar-rename", {"old": old_name, "new": new_name}))
 
 @mcp.tool
 def set_variable_type(ea: str, var_name: str, type_str: str) -> str:
@@ -355,7 +361,7 @@ def set_variable_type(ea: str, var_name: str, type_str: str) -> str:
         var_name: Variable name
         type_str: C type string (e.g. 'DWORD *', 'struct Player *')
     """
-    return json.dumps(_post(f"/api/function/{ea}/lvar-set-type", {"var": var_name, "type": type_str}))
+    return json.dumps(_post(f"/api/function/{_component(ea)}/lvar-set-type", {"var": var_name, "type": type_str}))
 
 @mcp.tool
 def set_function_type(ea: str, prototype: str) -> str:
@@ -365,7 +371,7 @@ def set_function_type(ea: str, prototype: str) -> str:
         ea: Function address
         prototype: C prototype (e.g. 'int __fastcall(void *this, int count)')
     """
-    return json.dumps(_post(f"/api/function/{ea}/set-type", {"type": prototype}))
+    return json.dumps(_post(f"/api/function/{_component(ea)}/set-type", {"type": prototype}))
 
 @mcp.tool
 def create_struct(definition: str) -> str:
@@ -395,6 +401,8 @@ def batch_mutations(mutations: str) -> str:
         mutations: JSON array string, e.g. '[{"op":"rename-func","ea":"0x...","name":"new_name"}]'
     """
     ops = json.loads(mutations)
+    if not isinstance(ops, list):
+        raise ValueError("mutations must decode to a JSON array")
     return json.dumps(_post("/api/batch", {"mutations": ops}), indent=2)
 
 # ─── Debugger Tools ──────────────────────────────────────────────────────────
@@ -447,7 +455,7 @@ def dbg_read_memory(ea: str, size: int) -> str:
         ea: Memory address
         size: Number of bytes to read
     """
-    return json.dumps(_get(f"/api/dbg/memory/{ea}/{size}"), indent=2)
+    return json.dumps(_get(f"/api/dbg/memory/{_component(ea)}/{size}"), indent=2)
 
 @mcp.tool
 def dbg_get_stack() -> str:
@@ -458,7 +466,7 @@ def dbg_get_stack() -> str:
 
 @mcp.tool
 def execute_idapython(script: str) -> str:
-    """Execute arbitrary IDAPython script in IDA Pro. Full SDK access.
+    """Execute IDAPython with full SDK access when the server explicitly enables it.
     Use the global 'result' dict to return structured data.
     
     Args:

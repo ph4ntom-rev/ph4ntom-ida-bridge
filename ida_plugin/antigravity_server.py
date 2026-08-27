@@ -9,7 +9,7 @@ Installation:
 
 Usage:
   Once loaded, the server listens on http://127.0.0.1:13370
-  Use bridge_cli.py to interact from outside.
+  Use cli.py to interact from outside.
 """
 
 import json
@@ -20,7 +20,7 @@ import secrets
 import tempfile
 import os
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 # IDA imports
 import ida_kernwin
@@ -33,7 +33,6 @@ import ida_entry
 import ida_idaapi
 import ida_auto
 import ida_lines
-import ida_xref
 import ida_typeinf
 try:
     import ida_range
@@ -53,17 +52,75 @@ except ImportError:
 
 HOST = "127.0.0.1"
 PORT = 13370
+BRIDGE_VERSION = "6.0.0"
 MAX_FUNCTIONS = 5000
 MAX_STRINGS = 2000
+MAX_BODY_SIZE = 5 * 1024 * 1024
 _cached_schema = None
 
 # ─── Authentication ──────────────────────────────────────────────────────────
 
-AUTH_TOKEN = secrets.token_hex(16)
-_token_path = os.path.join(tempfile.gettempdir(), ".antigravity_token")
-with open(_token_path, "w") as _f:
-    _f.write(AUTH_TOKEN)
-AUTH_ENABLED = True  # Set to False to disable auth (not recommended)
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _write_secure_token(token):
+    """Write the session token atomically with owner-only permissions."""
+    configured = os.environ.get("IDA_BRIDGE_TOKEN_FILE")
+    candidates = []
+    if configured:
+        candidates.append(os.path.abspath(os.path.expanduser(configured)))
+    candidates.extend([
+        os.path.join(os.path.expanduser("~"), ".antigravity_token"),
+        os.path.join(tempfile.gettempdir(), ".antigravity_token"),
+    ])
+
+    last_error = None
+    for token_path in candidates:
+        temp_path = None
+        try:
+            token_dir = os.path.dirname(token_path)
+            if token_dir:
+                os.makedirs(token_dir, mode=0o700, exist_ok=True)
+            temp_path = token_path + "." + secrets.token_hex(8) + ".tmp"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            fd = os.open(temp_path, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as token_file:
+                token_file.write(token)
+                token_file.flush()
+                try:
+                    os.fsync(token_file.fileno())
+                except OSError:
+                    pass
+            os.replace(temp_path, token_path)
+            try:
+                os.chmod(token_path, 0o600)
+            except OSError:
+                pass
+            return token_path
+        except OSError as exc:
+            last_error = exc
+            if temp_path:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+    raise RuntimeError("Unable to create a secure bridge token file: " + str(last_error))
+
+
+AUTH_TOKEN = secrets.token_hex(32)
+_token_path = _write_secure_token(AUTH_TOKEN)
+AUTH_ENABLED = not _env_flag("IDA_BRIDGE_DISABLE_AUTH", False)
+ALLOW_SCRIPT_EXECUTION = _env_flag("IDA_BRIDGE_ALLOW_EXEC", False)
+ALLOWED_IMPORT_ROOTS = tuple(
+    os.path.realpath(os.path.expanduser(path.strip()))
+    for path in os.environ.get("IDA_BRIDGE_ALLOWED_IMPORT_ROOTS", "").split(os.pathsep)
+    if path.strip()
+)
 
 # ─── Thread-Safe Execution ───────────────────────────────────────────────────
 
@@ -74,7 +131,7 @@ def safe_read(func):
     def wrapper():
         try:
             result[0] = func()
-        except Exception as e:
+        except Exception:
             error[0] = traceback.format_exc()
     ida_kernwin.execute_sync(wrapper, ida_kernwin.MFF_READ)
     if error[0]:
@@ -88,7 +145,7 @@ def safe_write(func):
     def wrapper():
         try:
             result[0] = func()
-        except Exception as e:
+        except Exception:
             error[0] = traceback.format_exc()
     ida_kernwin.execute_sync(wrapper, ida_kernwin.MFF_WRITE)
     if error[0]:
@@ -648,8 +705,6 @@ def rename_local_var(func_ea, old_name, new_name):
 def create_struct(c_definition):
     """Create a structure from C syntax."""
     def _inner():
-        til = ida_typeinf.get_idati()
-        errors = None
         try:
             count = idc.parse_decls(c_definition, idc.PT_TYP)
         except Exception as e:
@@ -735,8 +790,8 @@ def _do_rollback(actions):
                 rename_function(action[1], action[2])
             elif action[0] == "rename-var":
                 rename_local_var(action[1], action[2], action[3])
-        except:
-            pass  # Best effort
+        except Exception as exc:
+            ida_kernwin.msg("[Antigravity] Rollback action failed: " + str(exc) + "\n")
 
 # ─── Extended Sensor Functions ───────────────────────────────────────────────
 
@@ -806,7 +861,6 @@ def get_switch_info(ea):
         if not si:
             return {"error": f"No switch at {hex(ea)}"}
         cases = []
-        results = idc.get_switch_info(ea)
         jt = si.jumps
         ncases = si.get_jtable_size()
         for i in range(ncases):
@@ -861,9 +915,6 @@ def search_text_in_disasm(text, max_results=50):
 def get_global_vars(max_count=500):
     """Get global variables (named data items)."""
     def _inner():
-        import ida_ida
-        min_ea = ida_ida.inf_get_min_ea() if hasattr(ida_ida, 'inf_get_min_ea') else 0
-        max_ea = ida_ida.inf_get_max_ea() if hasattr(ida_ida, 'inf_get_max_ea') else 0xFFFFFFFF
         gvars = []
         count = 0
         for ea, name in idautils.Names():
@@ -1068,21 +1119,33 @@ def delete_bookmark_api(slot):
     return safe_write(_inner)
 
 def import_c_header(filepath):
-    """Import/parse a C header file securely with path validation."""
+    """Import a C header from an explicitly allowed directory."""
     def _inner():
         try:
             abs_path = os.path.realpath(filepath)
         except Exception:
             abs_path = os.path.abspath(filepath)
 
-        # Security: Prevent reading sensitive system files and UNC bypasses
-        blocked_prefixes = (
-            '/etc/', '/proc/', '/sys/', '/var/log/',  # Unix
-            'C:\\Windows\\', 'C:\\Users\\All Users\\', # Windows
-            '\\\\', # UNC path bypass
-        )
-        if any(abs_path.lower().startswith(prefix.lower()) for prefix in blocked_prefixes):
-            return {"success": False, "error": "Access to this path is restricted for security reasons."}
+        if not ALLOWED_IMPORT_ROOTS:
+            return {
+                "success": False,
+                "error": (
+                    "Header import is disabled. Set IDA_BRIDGE_ALLOWED_IMPORT_ROOTS "
+                    "to one or more trusted directories."
+                ),
+            }
+
+        allowed = False
+        for root in ALLOWED_IMPORT_ROOTS:
+            try:
+                common = os.path.commonpath((abs_path, root))
+                if os.path.normcase(common) == os.path.normcase(root):
+                    allowed = True
+                    break
+            except (ValueError, OSError):
+                continue
+        if not allowed:
+            return {"success": False, "error": "Header path is outside the allowed directories."}
 
         if not os.path.exists(abs_path) or not os.path.isfile(abs_path):
             return {"success": False, "error": f"File not found: {filepath}"}
@@ -1138,9 +1201,11 @@ def execute_dynamic_python(script_code):
         try:
             if hasattr(ida_auto, "auto_mark_range"):
                 try: ida_auto.auto_mark_range(0, ida_idaapi.BADADDR, ida_auto.AU_USED)
-                except Exception: pass
-            exec(script_code, globals(), local_vars)
-        except Exception as e:
+                # This SDK hint is optional; script execution remains valid without it.
+                except Exception: pass  # nosec B110
+            # This is the explicit, authenticated, opt-in capability of /api/exec.
+            exec(script_code, globals(), local_vars)  # nosec B102
+        except Exception:
             success = False
             error_msg = traceback.format_exc()
         finally:
@@ -1218,7 +1283,7 @@ def set_lvar_comment_api(func_ea, var_name, cmt):
     if not HAS_HEXRAYS: return {"error": "Hex-Rays not available"}
     def _inner():
         try: cfunc = ida_hexrays.decompile(func_ea)
-        except: return {"error": f"Decompile failed"}
+        except: return {"error": "Decompile failed"}
         if not cfunc: return {"error": "None"}
         for lv in cfunc.lvars:
             if lv.name == var_name:
@@ -1407,7 +1472,7 @@ def get_code_xrefs(ea):
 def _dbg_available():
     try:
         import ida_dbg
-        return True
+        return ida_dbg is not None
     except: return False
 
 def dbg_start_process(path=None, args="", sdir=None):
@@ -1495,7 +1560,8 @@ def dbg_get_regs():
                       "eax","ebx","ecx","edx","esi","edi","ebp","esp","eip"]:
             try:
                 if ida_dbg.get_reg_val(name, rv): regs[name] = hex(rv.ival)
-            except: pass
+            except Exception:
+                regs[name] = None
         return {"registers":regs}
     return safe_read(_inner)
 
@@ -1528,7 +1594,7 @@ def dbg_get_threads():
 
 def dbg_get_stack():
     def _inner():
-        import ida_dbg, ida_idd
+        import ida_dbg
         trace = ida_dbg.call_stack_t()
         ok = ida_dbg.get_call_stack(trace)
         if not ok: return {"error":"Cannot get call stack"}
@@ -1670,7 +1736,22 @@ def get_analyze_context(ea):
 
 # --- Micro Router ---
 import queue
-sse_queue = queue.Queue()
+sse_queue = queue.Queue(maxsize=256)
+
+
+def _publish_event(event):
+    """Publish an event without allowing UI hooks to block IDA."""
+    try:
+        sse_queue.put_nowait(event)
+    except queue.Full:
+        try:
+            sse_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            sse_queue.put_nowait(event)
+        except queue.Full:
+            pass
 
 GET_ROUTES = []
 POST_ROUTES = []
@@ -1694,14 +1775,14 @@ def route_macro_analyze_context(self, match, params):
 
 class AntigravityUIHooks(ida_kernwin.UI_Hooks):
     def screen_ea_changed(self, ea, prev_ea):
-        sse_queue.put({"event": "cursor_changed", "ea": hex(ea), "prev_ea": hex(prev_ea)})
+        _publish_event({"event": "cursor_changed", "ea": hex(ea), "prev_ea": hex(prev_ea)})
         return 0
 
 try:
     import ida_dbg
     class AntigravityDbgHooks(ida_dbg.DbgHooks):
         def dbg_bpt(self, tid, ea):
-            sse_queue.put({"event": "breakpoint_hit", "tid": tid, "ea": hex(ea)})
+            _publish_event({"event": "breakpoint_hit", "tid": tid, "ea": hex(ea)})
             return 0
     dbg_hooks = AntigravityDbgHooks()
 except Exception:
@@ -1769,13 +1850,20 @@ def route_do_get_13(self, match, params):
 
 @get_route(r'/api/ping')
 def route_do_get_14(self, match, params):
-    self.send_json({'status': 'ok', 'server': 'antigravity-ida-bridge', 'version': '4.0'})
+    self.send_json({
+        'status': 'ok',
+        'server': 'antigravity-ida-bridge',
+        'version': BRIDGE_VERSION,
+        'auth_enabled': AUTH_ENABLED,
+        'dynamic_exec_enabled': ALLOW_SCRIPT_EXECUTION,
+        'header_import_enabled': bool(ALLOWED_IMPORT_ROOTS),
+    })
 
 @get_route(r'/api/struct/.*')
 def route_do_get_15(self, match, params):
     parts = match.string.split('/')
     if len(parts) >= 4:
-        self.send_json(get_struct_details(parts[3]))
+        self.send_json(get_struct_details(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/struct/<name>')
 
@@ -1783,7 +1871,7 @@ def route_do_get_15(self, match, params):
 def route_do_get_16(self, match, params):
     parts = match.string.split('/')
     if len(parts) >= 4:
-        self.send_json(get_enum_details(parts[3]))
+        self.send_json(get_enum_details(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/enum/<name>')
 
@@ -1807,7 +1895,7 @@ def route_do_get_18(self, match, params):
 def route_do_get_19(self, match, params):
     parts = match.string.split('/', 4)
     if len(parts) >= 4:
-        self.send_json(find_func_by_name(parts[3]))
+        self.send_json(find_func_by_name(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/search-func/<name>')
 
@@ -1815,7 +1903,7 @@ def route_do_get_19(self, match, params):
 def route_do_get_20(self, match, params):
     parts = match.string.split('/', 4)
     if len(parts) >= 4:
-        self.send_json(search_bytes(parts[3]))
+        self.send_json(search_bytes(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/search-bytes/<pattern>')
 
@@ -1850,6 +1938,19 @@ def route_do_get_21(self, match, params):
         self.send_json(get_switch_info(ea))
     elif action == 'comment':
         self.send_json(get_comment_at(ea))
+    elif action == 'ctree':
+        self.send_json(get_ctree_json(ea))
+    elif action == 'lvar-map':
+        self.send_json(get_lvar_map(ea))
+    elif action == 'microcode':
+        maturity = int(params.get('maturity', [7])[0])
+        self.send_json(get_microcode(ea, maturity))
+    elif action == 'callers':
+        self.send_json(get_callers(ea))
+    elif action == 'callees':
+        self.send_json(get_callees(ea))
+    elif action == 'strings-used':
+        self.send_json(get_strings_used(ea))
     else:
         self.send_error_json(f'Unknown action: {action}')
 
@@ -1857,7 +1958,7 @@ def route_do_get_21(self, match, params):
 def route_do_get_22(self, match, params):
     parts = match.string.split('/', 4)
     if len(parts) >= 4:
-        self.send_json(search_text_in_disasm(parts[3]))
+        self.send_json(search_text_in_disasm(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/search-text/<text>')
 
@@ -1911,7 +2012,7 @@ def route_do_get_32(self, match, params):
 def route_do_get_33(self, match, params):
     parts = match.string.split('/', 4)
     if len(parts) >= 4:
-        self.send_json(get_type_by_name(parts[3]))
+        self.send_json(get_type_by_name(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/type/<name>')
 
@@ -1947,45 +2048,24 @@ def route_do_get_37(self, match, params):
     else:
         self.send_error_json('Use /api/code-xrefs/<ea>')
 
-@get_route(r'/api/function/.*')
-def route_do_get_38(self, match, params):
-    parts = match.string.split('/')
-    if len(parts) >= 5:
-        ea = parse_ea(parts[3])
-        act = parts[4]
-        if act == 'ctree':
-            self.send_json(get_ctree_json(ea))
-        elif act == 'lvar-map':
-            self.send_json(get_lvar_map(ea))
-        elif act == 'microcode':
-            mat = int(params.get('maturity', [7])[0])
-            self.send_json(get_microcode(ea, mat))
-        elif act == 'callers':
-            self.send_json(get_callers(ea))
-        elif act == 'callees':
-            self.send_json(get_callees(ea))
-        elif act == 'strings-used':
-            self.send_json(get_strings_used(ea))
-        else:
-            self.send_error_json(f'Unknown action: {act}')
-    else:
-        self.send_error_json('Use /api/function/<ea>/<action>')
-
 @get_route(r'/api/schema')
 def route_do_get_39(self, match, params):
     try:
         global _cached_schema
         if _cached_schema is None:
-            schema_path = os.path.realpath(os.path.join(os.path.dirname(__file__), '..', 'api_schema.json'))
-            if os.path.basename(schema_path) != 'api_schema.json':
-                raise ValueError('Invalid schema path')
-
-            if os.path.exists(schema_path) and os.path.isfile(schema_path):
-                with open(schema_path, 'r', encoding='utf-8') as f:
-                    _cached_schema = json.load(f)
-            else:
+            schema_candidates = (
+                os.path.join(os.path.dirname(__file__), 'api_schema.json'),
+                os.path.join(os.path.dirname(__file__), '..', 'api_schema.json'),
+            )
+            schema_path = next(
+                (os.path.realpath(path) for path in schema_candidates if os.path.isfile(path)),
+                None,
+            )
+            if schema_path is None:
                 self.send_error_json('api_schema.json not found', 404)
                 return
+            with open(schema_path, 'r', encoding='utf-8') as schema_file:
+                _cached_schema = json.load(schema_file)
         self.send_json(_cached_schema)
     except Exception as e:
         self.send_error_json(str(e), 500)
@@ -2028,6 +2108,10 @@ def route_do_post_1(self, match, data):
             self.send_error_json("Missing 'type' field")
             return
         self.send_json(set_func_type(ea, type_str))
+    elif action == 'lvar-set-type':
+        self.send_json(set_lvar_type_api(ea, data.get('var', ''), data.get('type', '')))
+    elif action == 'lvar-comment':
+        self.send_json(set_lvar_comment_api(ea, data.get('var', ''), data.get('comment', '')))
     else:
         self.send_error_json(f'Unknown POST action: {action}')
 
@@ -2147,7 +2231,16 @@ def route_do_post_22(self, match, data):
 
 @post_route(r'/api/exec')
 def route_do_post_23(self, match, data):
+    if not ALLOW_SCRIPT_EXECUTION:
+        self.send_error_json(
+            "Dynamic IDAPython execution is disabled. Set IDA_BRIDGE_ALLOW_EXEC=1 before starting IDA to enable it.",
+            403,
+        )
+        return
     script = data.get('script', '')
+    if not isinstance(script, str) or not script.strip():
+        self.send_error_json("Missing non-empty 'script' field")
+        return
     self.send_json(execute_dynamic_python(script))
 
 @post_route(r'/api/address/.*')
@@ -2240,29 +2333,16 @@ def route_do_post_42(self, match, data):
 def route_do_post_43(self, match, data):
     self.send_json(dbg_write_mem(parse_ea(data.get('ea', '0')), data.get('bytes', '')))
 
-@post_route(r'/api/function/.*')
-def route_do_post_44(self, match, data):
-    parts = match.string.split('/')
-    if len(parts) >= 5:
-        ea = parse_ea(parts[3])
-        act = parts[4]
-        if act == 'lvar-set-type':
-            self.send_json(set_lvar_type_api(ea, data.get('var', ''), data.get('type', '')))
-        elif act == 'lvar-comment':
-            self.send_json(set_lvar_comment_api(ea, data.get('var', ''), data.get('comment', '')))
-        else:
-            self.send_error_json(f'Unknown POST action: {act}')
-    else:
-        self.send_error_json('Invalid path')
-
-
 @get_route(r'/api/events')
 def route_events(self, match, params):
     self.send_response(200)
     self.send_header('Content-Type', 'text/event-stream')
     self.send_header('Cache-Control', 'no-cache')
     self.send_header('Connection', 'keep-alive')
-    self.send_header('Access-Control-Allow-Origin', '*')
+    origin = self.headers.get('Origin', '')
+    if self._is_local_origin(origin):
+        self.send_header('Access-Control-Allow-Origin', origin)
+        self.send_header('Vary', 'Origin')
     self.end_headers()
 
     while True:
@@ -2280,36 +2360,80 @@ def route_events(self, match, params):
 class BridgeHandler(BaseHTTPRequestHandler):
     """HTTP handler for the Antigravity-IDA Bridge."""
 
+    server_version = "AntigravityIDABridge/" + BRIDGE_VERSION
+
     def log_message(self, format, *args):
         """Log to IDA output window."""
         msg = format % args
         safe_read(lambda: ida_kernwin.msg(f"[Antigravity] {msg}\n"))
 
     def send_json(self, data, status=200):
+        payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(payload)))
+        origin = self.headers.get("Origin", "")
+        if self._is_local_origin(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
+        self.wfile.write(payload)
 
     def send_error_json(self, message, status=400):
         self.send_json({"error": message}, status)
+
+    @staticmethod
+    def _is_local_origin(origin):
+        if not origin:
+            return False
+        try:
+            return urlparse(origin).hostname in ("127.0.0.1", "localhost", "::1")
+        except ValueError:
+            return False
+
+    def _check_host(self):
+        host_header = self.headers.get("Host", "")
+        try:
+            hostname = urlparse("//" + host_header).hostname
+        except ValueError:
+            hostname = None
+        if hostname in ("127.0.0.1", "localhost", "::1"):
+            return True
+        self.send_error_json("Invalid Host header", 403)
+        return False
 
     def _check_auth(self):
         if not AUTH_ENABLED:
             return True
         auth = self.headers.get('Authorization', '')
-        if auth == f'Bearer {AUTH_TOKEN}':
+        if secrets.compare_digest(auth, f'Bearer {AUTH_TOKEN}'):
             return True
         # Allow unauthenticated ping and schema for discovery
         parsed = urlparse(self.path)
         if parsed.path.rstrip('/') in ('/api/ping', '/api/schema'):
             return True
-        self.send_json({"error": "Unauthorized. Pass 'Authorization: Bearer <token>' header. Token is in " + _token_path}, 401)
+        self.send_json({
+            "error": "Unauthorized. Pass the session token as an Authorization Bearer header.",
+            "token_file": _token_path,
+        }, 401)
         return False
 
+    def do_OPTIONS(self):
+        origin = self.headers.get("Origin", "")
+        if not self._is_local_origin(origin):
+            self.send_error_json("Origin is not allowed", 403)
+            return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Vary", "Origin")
+        self.end_headers()
+
     def do_GET(self):
-        if not self._check_auth(): return
+        if not self._check_host() or not self._check_auth():
+            return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
         params = parse_qs(parsed.query)
@@ -2322,13 +2446,37 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_error_json("Unknown GET endpoint: " + path, 404)
 
     def do_POST(self):
-        if not self._check_auth(): return
+        if not self._check_host() or not self._check_auth():
+            return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
-        cl = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(cl).decode("utf-8") if cl > 0 else "{}"
-        try: data = json.loads(body) if body else {}
-        except json.JSONDecodeError: return self.send_error_json("Invalid JSON body")
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            self.send_error_json("Invalid Content-Length header", 400)
+            return
+        if content_length < 0:
+            self.send_error_json("Invalid Content-Length header", 400)
+            return
+        if content_length > MAX_BODY_SIZE:
+            self.send_error_json(
+                "Request body exceeds the maximum size of " + str(MAX_BODY_SIZE) + " bytes",
+                413,
+            )
+            return
+        try:
+            body = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
+        except UnicodeDecodeError:
+            self.send_error_json("Request body must be UTF-8", 400)
+            return
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self.send_error_json("Invalid JSON body", 400)
+            return
+        if not isinstance(data, dict):
+            self.send_error_json("JSON body must be an object", 400)
+            return
         for pattern, handler in POST_ROUTES:
             m = pattern.match(path)
             if m:
@@ -2339,8 +2487,40 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 # ─── Server Lifecycle ────────────────────────────────────────────────────────
 
+class BridgeHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 _server = None
 _thread = None
+_hooks_active = False
+
+
+def _hook_events():
+    global _hooks_active
+    if _hooks_active:
+        return
+    ui_hooks.hook()
+    try:
+        if dbg_hooks:
+            dbg_hooks.hook()
+    except Exception:
+        ui_hooks.unhook()
+        raise
+    _hooks_active = True
+
+
+def _unhook_events():
+    global _hooks_active
+    if not _hooks_active:
+        return
+    try:
+        ui_hooks.unhook()
+    finally:
+        if dbg_hooks:
+            dbg_hooks.unhook()
+        _hooks_active = False
 
 def start_server(host=HOST, port=PORT):
     """Start the HTTP server in a background thread."""
@@ -2349,36 +2529,53 @@ def start_server(host=HOST, port=PORT):
         print(f"[Antigravity] Server already running on {host}:{port}")
         return
 
-    _server = ThreadingHTTPServer((host, port), BridgeHandler)
-    _thread = threading.Thread(target=_server.serve_forever, daemon=True)
-    _thread.start()
-
-    ui_hooks.hook()
-    if dbg_hooks:
-        dbg_hooks.hook()
-
-    ui_hooks.hook()
-    if dbg_hooks:
-        dbg_hooks.hook()
+    try:
+        server = BridgeHTTPServer((host, port), BridgeHandler)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="antigravity-ida-bridge",
+            daemon=True,
+        )
+        thread.start()
+        _hook_events()
+        _server = server
+        _thread = thread
+    except Exception:
+        try:
+            if thread.is_alive():
+                server.shutdown()
+                thread.join(timeout=2.0)
+        except (NameError, OSError, RuntimeError):
+            pass
+        try:
+            server.server_close()
+        except (NameError, OSError):
+            pass
+        _unhook_events()
+        raise
 
     print(f"[Antigravity] ✅ Bridge server started on http://{host}:{port}")
-    print(f"[Antigravity] 🔑 Auth token: {AUTH_TOKEN}")
     print(f"[Antigravity] 🔑 Token file: {_token_path}")
-    print(f"[Antigravity] Endpoints: /api/info, /api/functions, /api/function/<ea>/pseudocode, ...")
+    print(f"[Antigravity] Dynamic execution: {'enabled' if ALLOW_SCRIPT_EXECUTION else 'disabled'}")
+    print("[Antigravity] Endpoints: /api/info, /api/functions, /api/function/<ea>/pseudocode, ...")
     ida_kernwin.msg(f"[Antigravity] Bridge server started on http://{host}:{port}\n")
 
 def stop_server():
     """Stop the HTTP server."""
     global _server, _thread
-    if _server:
-        _server.shutdown()
+    server = _server
+    thread = _thread
+    _server = None
+    _thread = None
 
-    ui_hooks.unhook()
-    if dbg_hooks:
-        dbg_hooks.unhook()
+    if server is not None:
+        server.shutdown()
+        server.server_close()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=2.0)
 
-        _server = None
-        _thread = None
+    _unhook_events()
+    if server is not None:
         print("[Antigravity] Server stopped.")
         ida_kernwin.msg("[Antigravity] Bridge server stopped.\n")
 
@@ -2396,7 +2593,6 @@ class AntigravityPlugin(ida_idaapi.plugin_t):
         return ida_idaapi.PLUGIN_KEEP
 
     def run(self, arg):
-        global _server
         if _server is None:
             start_server()
         else:

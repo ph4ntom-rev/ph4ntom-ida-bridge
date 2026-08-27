@@ -1,26 +1,26 @@
 {
   "name": "Antigravity IDA Bridge",
-  "version": "5.1",
+  "version": "6.0.0",
   "description": "AI agent interface to IDA Pro reverse engineering environment",
   "bridge_url": "http://127.0.0.1:13370",
   "auth": {
     "type": "bearer",
-    "token_file": "${TEMP}/.antigravity_token",
+    "token_file": "~/.antigravity_token",
     "note": "Token is auto-generated when IDA plugin starts. Read from file and send as Authorization: Bearer <token>"
   },
 
   "integration_modes": {
     "ide_agent": {
-      "description": "For AI IDE agents (Antigravity IDE, Cursor, Windsurf). The IDE agent IS the brain — it reads this config and calls bridge.py via shell commands.",
-      "tool": "bridge.py",
+      "description": "For AI IDE agents (Antigravity IDE, Cursor, Windsurf). The IDE agent reads this config and calls cli.py via shell commands.",
+      "tool": "cli.py",
       "skill_file": "AGENT_SKILL.md",
-      "usage": "python bridge.py <command> [args]"
+      "usage": "python cli.py <command> [args]"
     },
     "mcp_server": {
-      "description": "For MCP-compatible clients (Claude Desktop, Cursor, Cline). Exposes 45 native MCP tools.",
-      "entry": "integrations/mcp_server.py",
-      "config_claude": {"command": "python", "args": ["integrations/mcp_server.py"]},
-      "config_cursor": {"command": "python", "args": ["integrations/mcp_server.py"]}
+      "description": "For MCP-compatible clients (Claude Desktop, Cursor, Cline). Exposes 54 native MCP tools.",
+      "entry": "mcp_server.py",
+      "config_claude": {"command": "python", "args": ["mcp_server.py"]},
+      "config_cursor": {"command": "python", "args": ["mcp_server.py"]}
     },
     "standalone_agent": {
       "description": "Interactive agent with built-in AI. Supports 5 backends.",
@@ -74,7 +74,8 @@
       "You can write ANY valid Python that would work in IDA's Script Command window",
       "Use ida_auto.auto_wait() before analysis-dependent operations",
       "Use idc.set_name(), idc.set_cmt() to annotate the database",
-      "Long scripts are fine — there is no size limit",
+      "Dynamic execution is disabled by default; set IDA_BRIDGE_ALLOW_EXEC=1 before starting IDA to enable it",
+      "The complete HTTP request body is limited to 5 MiB",
       "If an endpoint doesn't exist for what you need, generate a script instead"
     ]
   },

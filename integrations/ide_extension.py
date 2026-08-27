@@ -11,13 +11,14 @@ Provides:
 
 Can run as:
 1. Standalone HTTP server for IDE extensions
-2. MCP server (via integrations/mcp_server.py)
+2. MCP server (via mcp_server.py)
 3. Imported as library by an IDE plugin
 """
 
 import os
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import copy
+
 from core.client import BridgeClient
 
 
@@ -51,14 +52,16 @@ class IDEBridge:
     def _load_config(self) -> dict:
         """Load config from workspace .antigravity/config.json"""
         config_path = os.path.join(self.workspace, ".antigravity", "config.json")
+        merged = copy.deepcopy(DEFAULT_CONFIG)
         if os.path.exists(config_path):
-            with open(config_path, "r") as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 user_config = json.load(f)
-                # Merge with defaults
-                merged = DEFAULT_CONFIG.copy()
-                merged.update(user_config)
-                return merged
-        return DEFAULT_CONFIG.copy()
+            for section, values in user_config.items():
+                if isinstance(values, dict) and isinstance(merged.get(section), dict):
+                    merged[section].update(values)
+                else:
+                    merged[section] = values
+        return merged
 
     def init_workspace(self):
         """Create .antigravity/ config directory in workspace."""
@@ -66,7 +69,7 @@ class IDEBridge:
         os.makedirs(config_dir, exist_ok=True)
         config_path = os.path.join(config_dir, "config.json")
         if not os.path.exists(config_path):
-            with open(config_path, "w") as f:
+            with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(DEFAULT_CONFIG, f, indent=2)
             print(f"[+] Created {config_path}")
         return config_path
@@ -121,7 +124,7 @@ CURSOR_MCP_CONFIG = {
     "mcpServers": {
         "ida-bridge": {
             "command": "python",
-            "args": ["integrations/mcp_server.py"],
+            "args": ["mcp_server.py"],
         }
     }
 }
@@ -139,19 +142,19 @@ def generate_ide_configs(workspace: str = "."):
     vscode_settings_path = os.path.join(vscode_dir, "settings.json")
     
     if os.path.exists(vscode_settings_path):
-        with open(vscode_settings_path, "r") as f:
+        with open(vscode_settings_path, "r", encoding="utf-8") as f:
             settings = json.load(f)
     else:
         settings = {}
     
     settings.update(VSCODE_SETTINGS)
-    with open(vscode_settings_path, "w") as f:
+    with open(vscode_settings_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
     # .cursor/mcp.json
     cursor_dir = os.path.join(workspace, ".cursor")
     os.makedirs(cursor_dir, exist_ok=True)
-    with open(os.path.join(cursor_dir, "mcp.json"), "w") as f:
+    with open(os.path.join(cursor_dir, "mcp.json"), "w", encoding="utf-8") as f:
         json.dump(CURSOR_MCP_CONFIG, f, indent=2)
 
     print(f"[+] Generated IDE configs in {workspace}")

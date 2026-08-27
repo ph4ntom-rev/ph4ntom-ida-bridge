@@ -15,10 +15,18 @@ import json
 import time
 import argparse
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import BaseModel, Field
-from google import genai
-from google.genai import types
+
+try:
+    from google import genai
+    from google.genai import types
+    HAS_GENAI = True
+except ImportError:
+    genai = None
+    types = None
+    HAS_GENAI = False
 
 from core.client import BridgeClient
 
@@ -61,10 +69,25 @@ def analyze_with_backoff(client, ea: str, pseudocode: str, retries: int = 4):
     return None
 
 
-def process_batch(bridge: BridgeClient, functions: list, max_workers: int = 5):
+def _sanitize_symbol(name: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9_$?@]", "_", name.strip())[:128]
+    if sanitized and sanitized[0].isdigit():
+        sanitized = "fn_" + sanitized
+    return sanitized
+
+
+def process_batch(
+    bridge: BridgeClient,
+    functions: list,
+    max_workers: int = 5,
+    apply_changes: bool = False,
+):
     if not API_KEY:
         logging.error("GEMINI_API_KEY is not set!")
-        return
+        return []
+    if not HAS_GENAI:
+        logging.error("google-genai is not installed. Install the swarm optional dependencies.")
+        return []
 
     genai_client = genai.Client(api_key=API_KEY)
     logging.info(f"Processing {len(functions)} functions with {max_workers} threads...")
@@ -82,10 +105,11 @@ def process_batch(bridge: BridgeClient, functions: list, max_workers: int = 5):
             return None
 
         analysis = analyze_with_backoff(genai_client, ea, code)
-        if analysis and analysis.get("suggested_name") and not analysis["suggested_name"].startswith("sub_"):
+        suggested_name = _sanitize_symbol(analysis.get("suggested_name", "")) if analysis else ""
+        if suggested_name and not suggested_name.startswith("sub_"):
             return {
                 "ea": ea, "old_name": name,
-                "new_name": analysis["suggested_name"],
+                "new_name": suggested_name,
                 "comment": analysis.get("comment", "")
             }
         return None
@@ -93,7 +117,11 @@ def process_batch(bridge: BridgeClient, functions: list, max_workers: int = 5):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(worker, f): f for f in functions}
         for future in as_completed(futures):
-            res = future.result()
+            try:
+                res = future.result()
+            except Exception as exc:
+                logging.error("Worker failed for %s: %s", futures[future].get("ea"), exc)
+                continue
             if res:
                 mutations.extend([
                     {"op": "rename-func", "ea": res["ea"], "name": res["new_name"]},
@@ -101,7 +129,7 @@ def process_batch(bridge: BridgeClient, functions: list, max_workers: int = 5):
                 ])
                 logging.info(f"[+] {res['old_name']} -> {res['new_name']}")
 
-    if mutations:
+    if mutations and apply_changes:
         logging.info(f"Applying {len(mutations)} mutations atomically...")
         res = bridge.batch(mutations)
         if "error" in res:
@@ -109,26 +137,43 @@ def process_batch(bridge: BridgeClient, functions: list, max_workers: int = 5):
         else:
             bridge.wait_analysis()
             logging.info("Done.")
+    elif mutations:
+        logging.info("Dry run: generated %d mutations; pass --apply to write them.", len(mutations))
+    return mutations
 
 
 def main():
     parser = argparse.ArgumentParser(description="Antigravity Swarm Worker")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--workers", type=int, default=3)
+    parser.add_argument("--apply", action="store_true", help="Apply proposed renames/comments to IDA")
     args = parser.parse_args()
 
-    bridge = BridgeClient()
-    res = bridge.functions()
-    if "error" in res:
-        logging.error(f"Bridge error: {res['error']}")
-        return
+    if args.limit <= 0:
+        parser.error("--limit must be greater than zero")
+    if not 1 <= args.workers <= 16:
+        parser.error("--workers must be between 1 and 16")
 
-    unnamed = [f for f in res.get("functions", []) if f["name"].startswith("sub_")]
-    if unnamed:
-        process_batch(bridge, unnamed[:args.limit], max_workers=args.workers)
-    else:
-        logging.info("No unnamed functions found.")
+    with BridgeClient() as bridge:
+        res = bridge.functions()
+        if "error" in res:
+            logging.error(f"Bridge error: {res['error']}")
+            return 1
+
+        unnamed = [f for f in res.get("functions", []) if f["name"].startswith("sub_")]
+        if unnamed:
+            mutations = process_batch(
+                bridge,
+                unnamed[:args.limit],
+                max_workers=args.workers,
+                apply_changes=args.apply,
+            )
+            if mutations and not args.apply:
+                print(json.dumps({"mutations": mutations}, indent=2))
+        else:
+            logging.info("No unnamed functions found.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

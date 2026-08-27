@@ -1,208 +1,215 @@
-# Antigravity IDA Bridge 🌉
+# Antigravity IDA Bridge
 
-> **AI-native reverse engineering platform** — Any AI agent controls IDA Pro.
+Antigravity IDA Bridge is a localhost-only control layer for IDA Pro 9.x. It
+combines a self-contained IDA plugin, a JSON REST API, a Python client, a CLI,
+54 MCP tools, and optional standalone AI backends.
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg?style=flat-square)](https://python.org)
-[![IDA Pro 9.x](https://img.shields.io/badge/IDA_Pro-9.x-blueviolet?style=flat-square)](https://hex-rays.com)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
-[![Endpoints](https://img.shields.io/badge/endpoints-90+-orange?style=flat-square)](#api-coverage)
-[![MCP](https://img.shields.io/badge/MCP-Compatible-00ff41?style=flat-square)](#2-mcp-server)
-[![Backends](https://img.shields.io/badge/AI_backends-5-ff6b6b?style=flat-square)](#3-standalone-agent)
+The API schema currently documents 54 read endpoints and 48 write endpoints.
+IDA-specific behavior still needs to be tested inside a real IDA installation;
+the repository test suite validates the client, CLI, schema, routing contract,
+MCP registration, and security defaults without requiring IDA.
 
----
+## Security model
 
-## What Is This?
+The bridge runs inside IDA, so authenticated write access is powerful. The
+`/api/exec` endpoint is equivalent to local code execution as the IDA user.
 
-A plugin for **IDA Pro** that turns it into an API server with **90+ REST endpoints**. Any AI agent — IDE-based, cloud, local, or MCP — can control IDA Pro, decompile code, trace cross-references, rename functions, and even **generate and execute IDAPython scripts on the fly**.
+Version 6 uses these defaults:
 
+- binds only to `127.0.0.1:13370`;
+- creates a 256-bit session token in `~/.antigravity_token`;
+- refreshes stale tokens automatically after an IDA restart;
+- limits POST bodies to 5 MiB;
+- permits browser CORS only from localhost origins;
+- disables dynamic IDAPython execution by default;
+- disables local C-header imports until trusted directories are configured.
+
+Never expose port 13370 through a public interface, tunnel, or reverse proxy.
+See [SECURITY.md](SECURITY.md) for the full guidance.
+
+## Components
+
+| Path | Purpose |
+| --- | --- |
+| `ida_plugin/antigravity_server.py` | Canonical IDA plugin and REST server |
+| `api_schema.json` | Machine-readable REST reference |
+| `core/client.py` | Shared authenticated HTTP client |
+| `cli.py` | CLI, plugin installer, and IDA launcher |
+| `mcp_server.py` | MCP server exposing 54 tools and two resources |
+| `agent.py` | Optional interactive agent with multiple LLM backends |
+| `swarm_worker.py` | Optional structured-analysis worker |
+| `agent_config.json` | Machine-readable integration configuration |
+| `AGENT_SKILL.md` | Instructions for IDE-based agents |
+
+`server.py` remains only as a compatibility wrapper. All server changes belong
+in `ida_plugin/antigravity_server.py` so the two implementations cannot drift.
+
+## Install
+
+Python 3.10 or newer is required for the external tools. IDA itself supplies
+the IDAPython modules used by the plugin.
+
+```bash
+git clone https://github.com/ph4ntom-rev/antigravity-ida-bridge.git
+cd antigravity-ida-bridge
+python -m pip install -e .
 ```
-              ┌─────────────────────────────────────────┐
-              │             IDA Pro 9.x                  │
-              │  antigravity_server.py (90+ endpoints)   │
-              │  http://127.0.0.1:13370                  │
-              └──────────────────┬──────────────────────┘
-                                 │ REST / JSON
-         ┌───────────┬───────────┼───────────┬───────────┐
-         ▼           ▼           ▼           ▼           ▼
-   ┌──────────┐ ┌──────────┐ ┌────────┐ ┌────────┐ ┌────────┐
-   │Antigravity│ │   MCP    │ │Standalone│ │ Direct │ │ Swarm  │
-   │   IDE    │ │ Server   │ │ Agent  │ │  API   │ │ Worker │
-   │          │ │          │ │        │ │        │ │        │
-   │ bridge.py│ │ 45 tools │ │ 5 LLMs │ │ curl / │ │ Bulk   │
-   │ + skill  │ │ Claude   │ │ Ollama │ │ Python │ │ scan   │
-   │          │ │ Cursor   │ │ Gemini │ │        │ │        │
-   └──────────┘ └──────────┘ └────────┘ └────────┘ └────────┘
+
+Install the plugin and API schema into IDA:
+
+```bash
+python cli.py install-plugin --ida-dir "C:\Program Files\IDA Professional 9.0"
 ```
 
-## 4 Ways to Connect
+If an older installed copy differs, review it and then use `--force`. The
+installer creates a `.bak` file before replacement.
 
-### 1. AI IDE Agent (Antigravity IDE / Cursor / Windsurf)
+Manual installation is also supported: copy both files below into IDA's
+`plugins` directory.
 
-Your IDE already has an AI agent. Give it **hands inside IDA** — it reads `agent_config.json`, calls `bridge.py`, gets JSON back.
-
-```
-You: "find all network functions in this binary"
-IDE Agent reads: agent_config.json (knows all commands + script execution)
-IDE Agent runs:  python bridge.py strings --filter socket    → JSON
-IDE Agent runs:  python bridge.py decompile 0x140005A00      → JSON
-IDE Agent runs:  python bridge.py exec "print(idautils...)"  → JSON
-IDE Agent:       "Found 3 network functions, here's what they do..."
+```text
+ida_plugin/antigravity_server.py
+api_schema.json
 ```
 
-**Setup:** Place `AGENT_SKILL.md` and `agent_config.json` in your workspace. The agent reads them automatically.
+Start IDA and press `Ctrl+Shift+A` to toggle the server. The IDA output window
+shows the URL and token-file location, but never prints the token itself.
 
-### 2. MCP Server (Claude Desktop / Cursor / Cline)
+## CLI quick start
 
-45 native MCP tools. Zero configuration beyond pointing to the server.
+```bash
+python cli.py ping
+python cli.py info
+python cli.py functions --limit 100
+python cli.py strings --filter "socket|http"
+python cli.py decompile 0x140001000
+python cli.py xrefs 0x140001000
+python cli.py callers 0x140001000
+python cli.py api GET /api/function/0x140001000/ctree
+python cli.py api POST /api/function/0x140001000/rename --body "{\"name\":\"init_network\"}"
+```
+
+The installed console command is equivalent:
+
+```bash
+antigravity-ida ping
+```
+
+To launch IDA without silently installing or replacing anything:
+
+```bash
+python cli.py launch sample.exe --wait
+```
+
+Use `--headless` only when autonomous IDA analysis is intended.
+
+## Optional dynamic IDAPython
+
+Dynamic execution is intentionally off by default. Enable it before launching
+IDA only on a trusted machine.
+
+PowerShell:
+
+```powershell
+$env:IDA_BRIDGE_ALLOW_EXEC = "1"
+```
+
+Bash:
+
+```bash
+export IDA_BRIDGE_ALLOW_EXEC=1
+```
+
+Then execute inline code, a file, or stdin:
+
+```bash
+python cli.py exec "result['ea'] = hex(idc.here())"
+python cli.py exec --file analysis.py
+python generate_script.py | python cli.py exec -
+```
+
+Scripts receive full IDAPython access and a `result` dictionary. Standard output
+and standard error are captured in the JSON response.
+
+## Header imports
+
+`POST /api/import-header` is disabled until trusted roots are supplied before
+IDA starts. Separate multiple directories with the operating system path
+separator (`;` on Windows, `:` on Unix-like systems).
+
+```powershell
+$env:IDA_BRIDGE_ALLOWED_IMPORT_ROOTS = "C:\reverse\headers;D:\sdk\include"
+```
+
+## MCP
+
+Install the MCP extra:
+
+```bash
+python -m pip install -e ".[mcp]"
+```
+
+Use absolute paths in the MCP client configuration:
 
 ```json
 {
   "mcpServers": {
     "ida-bridge": {
       "command": "python",
-      "args": ["path/to/integrations/mcp_server.py"]
+      "args": ["C:/path/to/antigravity-ida-bridge/mcp_server.py"]
     }
   }
 }
 ```
 
-### 3. Standalone Agent (no IDE needed)
+The shared client detects token rotation, so the MCP process does not need to be
+restarted every time IDA restarts.
 
-Built-in AI agent with 5 interchangeable backends:
+## Optional agent backends
 
-```bash
-python agent.py                          # Auto-detect best backend
-python agent.py --backend ollama         # 🏠 Local (free, private)
-python agent.py --backend gemini         # ☁️ Google Gemini
-python agent.py --backend openai         # ☁️ OpenAI GPT-4o
-python agent.py --backend anthropic      # ☁️ Anthropic Claude
-python agent.py --backend deepseek       # ☁️ DeepSeek
-```
-
-### 4. Direct REST API (any HTTP client)
+Install all provider integrations:
 
 ```bash
-curl http://127.0.0.1:13370/api/info
-curl http://127.0.0.1:13370/api/function/0x140001000/pseudocode
-curl -X POST http://127.0.0.1:13370/api/exec -d '{"script":"print(here())"}'
-```
-
-## Dynamic Script Execution
-
-The most powerful feature: **the AI agent can generate Python scripts and execute them inside IDA Pro in real-time**.
-
-This isn't limited to the 90 pre-built endpoints. The agent can write *any* IDAPython code:
-
-```python
-# Agent generates this script on the fly and sends it to /api/exec:
-import idautils, idc
-
-result['suspicious'] = []
-for ea in idautils.Functions():
-    name = idc.get_func_name(ea)
-    for ref in idautils.CodeRefsFrom(ea, 0):
-        api = idc.get_func_name(ref)
-        if api in ['CreateRemoteThread', 'VirtualAllocEx', 'WriteProcessMemory']:
-            result['suspicious'].append({
-                'function': name,
-                'address': hex(ea),
-                'calls': api
-            })
-```
-
-Available IDA SDK modules: `idc`, `idaapi`, `idautils`, `ida_hexrays`, `ida_funcs`, `ida_bytes`, `ida_struct`, `ida_dbg`, `ida_typeinf`, `ida_segment`, `ida_xref`, `ida_auto`, and 10+ more.
-
-The agent sees the full list in `agent_config.json` with examples.
-
-## Quick Start
-
-### 1. Install Plugin
-
-Copy `ida_plugin/antigravity_server.py` → IDA `plugins/` folder.
-
-### 2. Install Dependencies
-
-```bash
-pip install requests                    # Core (required)
-pip install ollama                      # Local LLM backend
-pip install google-genai                # Gemini backend
-pip install openai                      # OpenAI / DeepSeek backend
-pip install anthropic                   # Claude backend
-pip install fastmcp                     # MCP Server
-```
-
-### 3. Use
-
-```bash
-# Terminal CLI
-python bridge.py ping
-python bridge.py info
-python bridge.py decompile 0x140001000
-python bridge.py strings --filter password
-python bridge.py launch binary.exe
-python bridge.py exec "print(idc.get_func_name(here()))"
-
-# Interactive agent
+python -m pip install -e ".[agents]"
 python agent.py --backend ollama
 ```
 
-## Key Files
+Available backends are Ollama, Gemini, OpenAI-compatible APIs, Anthropic, and
+DeepSeek. Provider API keys are read from environment variables; they are not
+stored by this repository.
 
-| File | For Whom | Purpose |
-|:-----|:---------|:--------|
-| `agent_config.json` | **Any AI agent** | Machine-readable config — all commands, all modes, script examples |
-| `AGENT_SKILL.md` | **IDE agents** | Human-readable instructions for IDE AI agents |
-| `bridge.py` | **IDE agents** | Single-file CLI — all commands, clean JSON output |
-| `ida_plugin/antigravity_server.py` | **IDA Pro** | HTTP server plugin (90+ endpoints) |
-| `integrations/mcp_server.py` | **MCP clients** | 45 MCP tools for Claude/Cursor/Cline |
-| `agent.py` | **Terminal users** | Standalone agent with 5 AI backends |
-| `api_schema.json` | **Agents** | Full API specification (system prompt) |
+## REST API
 
-## API Coverage
+Every response is JSON. Addresses are normally written as hexadecimal strings.
+Use the live schema endpoint or the checked-in schema for the complete reference:
 
-<details>
-<summary><b>📖 Full Endpoint List (90+)</b></summary>
+```bash
+python cli.py schema
+```
 
-### Read Endpoints (GET)
+Key endpoint groups include:
 
-| Category | Endpoints |
-|:---------|:----------|
-| **Binary Info** | `/api/info`, `/api/ping`, `/api/schema` |
-| **Functions** | `/api/functions`, `/api/functions-page`, `/api/function/<ea>/details` |
-| **Decompilation** | `/api/function/<ea>/pseudocode`, `/api/function/<ea>/ctree`, `/api/function/<ea>/microcode` |
-| **Variables** | `/api/function/<ea>/lvar-map`, `/api/function/<ea>/args`, `/api/function/<ea>/stack-vars` |
-| **Cross-References** | `/api/function/<ea>/xrefs-to`, `/api/function/<ea>/xrefs-from`, `/api/data-xrefs/<ea>`, `/api/code-xrefs/<ea>` |
-| **Navigation** | `/api/function/<ea>/callers`, `/api/function/<ea>/callees`, `/api/function/<ea>/call-graph`, `/api/function/<ea>/strings-used` |
-| **Control Flow** | `/api/function/<ea>/basic-blocks` |
-| **Strings & Search** | `/api/strings`, `/api/search-func/<name>`, `/api/search-bytes/<pattern>`, `/api/search-text/<text>` |
-| **Imports/Exports** | `/api/imports`, `/api/exports` |
-| **Types & Structs** | `/api/structs`, `/api/struct/<name>`, `/api/enums`, `/api/enum/<name>`, `/api/types`, `/api/type/<name>`, `/api/type-libraries` |
-| **Memory** | `/api/bytes/<ea>/<size>`, `/api/vtable/<ea>`, `/api/segments`, `/api/global-vars` |
-| **Debugger** | `/api/dbg/regs`, `/api/dbg/breakpoints`, `/api/dbg/threads`, `/api/dbg/stack`, `/api/dbg/memory/<ea>/<size>` |
-| **UI** | `/api/cursor`, `/api/selection`, `/api/bookmarks`, `/api/patches`, `/api/gaps` |
+- binary metadata, functions, instructions, strings, imports, and exports;
+- pseudocode, ctree, microcode, local variables, callers, and callees;
+- cross-references, control-flow graphs, types, structures, and enums;
+- database mutations with batch rollback support;
+- debugger control, registers, threads, stack, and memory;
+- cursor events over server-sent events.
 
-### Write Endpoints (POST)
+## Development
 
-| Category | Endpoints |
-|:---------|:----------|
-| **Naming** | `rename`, `lvar-rename`, `set-name`, `comment`, `lvar-comment` |
-| **Types** | `set-type`, `lvar-set-type`, `type/create`, `type/delete`, `type-library/load` |
-| **Structures** | `struct/create`, `struct/add-member`, `delete-struct`, `apply-struct` |
-| **Enums** | `enum/create`, `enum/add-member`, `delete-enum` |
-| **Segments** | `segment/create`, `segment/delete`, `segment/set-attrs` |
-| **Binary Mod** | `patch-bytes`, `make-code`, `make-data`, `make-func`, `delete-func`, `undefine` |
-| **Debugger** | `dbg/start`, `dbg/attach`, `dbg/detach`, `dbg/breakpoint`, `dbg/step-into`, `dbg/step-over`, `dbg/continue`, `dbg/pause`, `dbg/write-memory` |
-| **Script** | `exec` — **execute any IDAPython script generated by the AI** |
-| **Utility** | `batch`, `save`, `undo`, `redo`, `navigate`, `reanalyze` |
+```bash
+python -m pip install -e ".[dev,mcp]"
+python -m compileall -q agent.py cli.py core ida_plugin integrations mcp_server.py server.py swarm_worker.py tests
+python -m flake8 . --select=F --exclude=.venv
+python -m pytest -q
+python verify_mcp.py
+```
 
-</details>
-
-## Security
-
-- **Bearer Token Auth** — Auto-generated per session, stored in temp file
-- **Localhost Only** — Binds to `127.0.0.1`, not exposed to network
-- **Path Hardening** — Directory traversal and UNC path protection
-- **Atomic Rollback** — `undo` endpoint reverts AI mistakes
+GitHub Actions runs syntax checks, Flake8 correctness checks, and tests on
+Python 3.10, 3.11, and 3.12. Tests that exercise real IDA SDK behavior must be
+performed manually inside IDA using a disposable database before release.
+Follow [TESTING.md](TESTING.md) for the IDA smoke and regression checklist.
 
 ## License
 

@@ -1,6 +1,8 @@
 from core.client import BridgeClient
 from unittest.mock import patch, Mock
 
+import pytest
+
 
 class TestBridgeClient:
     def test_init_default(self):
@@ -10,6 +12,18 @@ class TestBridgeClient:
     def test_init_custom_url(self):
         client = BridgeClient(url="http://test:8080/")
         assert client.base_url == "http://test:8080"
+
+    @pytest.mark.parametrize(
+        "url",
+        ["localhost:13370", "ftp://localhost", "http://user:pass@localhost", "http://localhost/#fragment"],
+    )
+    def test_init_rejects_unsafe_or_invalid_url(self, url):
+        with pytest.raises(ValueError):
+            BridgeClient(url=url)
+
+    def test_init_rejects_non_positive_timeout(self):
+        with pytest.raises(ValueError):
+            BridgeClient(timeout=0)
 
     @patch('core.client.requests.Session.request')
     def test_get_success(self, mock_request):
@@ -70,3 +84,37 @@ class TestBridgeClient:
 
         assert response["success"] is False
         assert "Invalid JSON response" in response["error"]
+
+    def test_path_component_encodes_reserved_characters(self):
+        assert BridgeClient.path_component("name/with space") == "name%2Fwith%20space"
+
+    def test_call_api_rejects_unsupported_method(self):
+        client = BridgeClient()
+        response = client.call_api("DELETE", "/api/test")
+        assert response == {"error": "Only GET and POST are supported", "success": False}
+
+    @patch('core.client.requests.Session.request')
+    def test_reloads_rotated_token_after_unauthorized(self, mock_request, tmp_path):
+        token_file = tmp_path / "token"
+        token_file.write_text("old-token", encoding="utf-8")
+        client = BridgeClient(token_file=str(token_file))
+
+        unauthorized = Mock(status_code=401, text='{"error":"Unauthorized"}')
+        success = Mock(status_code=200, text='{"status":"ok"}')
+        success.json.return_value = {"status": "ok"}
+        success.raise_for_status.return_value = None
+        mock_request.side_effect = [unauthorized, success]
+
+        token_file.write_text("new-token", encoding="utf-8")
+        response = client.ping()
+
+        assert response == {"status": "ok"}
+        assert client.session.headers["Authorization"] == "Bearer new-token"
+        assert mock_request.call_count == 2
+
+    def test_context_manager_closes_session(self):
+        client = BridgeClient()
+        with patch.object(client.session, "close") as close:
+            with client as active:
+                assert active is client
+            close.assert_called_once_with()

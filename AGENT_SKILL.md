@@ -1,102 +1,57 @@
-# Antigravity IDE ↔ IDA Bridge — Agent Skill
-# ============================================
-# This skill teaches the Antigravity IDE agent how to use the IDA Bridge
-# to perform reverse engineering tasks autonomously.
-#
-# Place this file in your workspace so the IDE agent reads it.
-#
-# HOW IT WORKS:
-# 1. User says: "analyze C:\malware.exe"
-# 2. IDE agent reads this skill file
-# 3. IDE agent uses run_command to call bridge.py
-# 4. IDE agent interprets results and continues analysis
-#
-# The IDE agent IS the AI brain — no separate agent.py needed.
+# Antigravity IDE ↔ IDA Bridge agent guide
 
-## What is the IDA Bridge?
+Use `cli.py` to communicate with the REST server running inside IDA Pro at
+`http://127.0.0.1:13370`. Commands return JSON and automatically load the
+session token from `~/.antigravity_token`.
 
-The IDA Bridge is a REST API server running inside IDA Pro on http://127.0.0.1:13370.
-It exposes 90+ endpoints that let you read and write IDA's analysis database via HTTP.
+## Safety rules
 
-## How the IDE Agent Should Use It
+1. Start with read-only inspection.
+2. Do not rename, comment, patch, debug, execute code, or save the database
+   unless the user has authorized that class of change.
+3. Prefer a documented endpoint over dynamic IDAPython.
+4. Treat `/api/exec` as local code execution. It is unavailable unless the IDA
+   process was started with `IDA_BRIDGE_ALLOW_EXEC=1`.
+5. Use `/api/batch` for related mutations so failures can be rolled back.
+6. Work on a copy of the database when testing destructive operations.
 
-The agent (you) can control IDA Pro by running Python commands via `run_command`.
-The main tool is `bridge.py` — a single-file CLI that wraps all bridge operations.
-
-### Quick Reference
+## Quick reference
 
 ```bash
-# Check if bridge is online
-python bridge.py ping
-
-# Get binary info
-python bridge.py info
-
-# Decompile a function
-python bridge.py decompile 0x140001000
-
-# Search for strings
-python bridge.py strings --filter "password"
-
-# List all functions
-python bridge.py functions --limit 50
-
-# Get cross-references
-python bridge.py xrefs 0x140001000
-
-# Execute custom IDAPython script
-python bridge.py exec "print(idc.get_func_name(here()))"
-
-# Run any API endpoint directly
-python bridge.py api GET /api/function/0x140001000/callers
-python bridge.py api POST /api/function/0x140001000/rename --body "{\"name\": \"init_network\"}"
+python cli.py ping
+python cli.py info
+python cli.py functions --limit 100
+python cli.py strings --filter "password|token|http"
+python cli.py decompile 0x140001000
+python cli.py xrefs 0x140001000
+python cli.py callers 0x140001000
+python cli.py callees 0x140001000
+python cli.py api GET /api/function/0x140001000/ctree
+python cli.py api GET /api/function/0x140001000/microcode --param maturity=0
+python cli.py api POST /api/function/0x140001000/rename --body "{\"name\":\"init_network\"}"
 ```
 
-### Autonomous Workflow
+Dynamic execution, when explicitly enabled:
 
-When the user asks you to analyze a binary, follow this workflow:
+```bash
+python cli.py exec "result['current_ea'] = hex(idc.here())"
+python cli.py exec --file analysis.py
+```
 
-1. **CHECK**: Run `python bridge.py ping` to see if IDA is running
-2. **LAUNCH** (if needed): Run `python bridge.py launch C:\path\to\binary.exe`
-   - This finds IDA Pro automatically and opens the binary
-   - Wait for the bridge to come online with `python bridge.py wait`
-3. **ORIENT**: Run `python bridge.py info` to understand the binary (arch, size, entry point)
-4. **ANALYZE**: Use bridge.py commands to explore:
-   - `python bridge.py functions` — see all functions
-   - `python bridge.py strings` — find interesting strings
-   - `python bridge.py decompile <addr>` — read function code
-   - `python bridge.py xrefs <addr>` — follow references
-5. **MUTATE**: Rename functions, add comments, set types to document findings
-6. **REPORT**: Summarize your analysis to the user
+## Analysis workflow
 
-### Key Endpoints You Can Call
+1. Run `python cli.py ping` and check the reported capabilities.
+2. If offline, ask the user to start IDA and toggle the plugin with
+   `Ctrl+Shift+A`, or use `python cli.py launch <binary> --wait` when launching
+   IDA is within scope.
+3. Run `info`, then page through `functions` and inspect relevant strings,
+   imports, and exports.
+4. Decompile candidate functions and verify conclusions with xrefs, callers,
+   callees, ctree, or microcode.
+5. Present findings before making database changes unless the user already
+   requested those changes.
+6. After authorized mutations, verify the changed object and save only when the
+   user asked to persist the database.
 
-**Reading data:**
-- `/api/info` — binary metadata
-- `/api/functions` — all functions list
-- `/api/function/<ea>/pseudocode` — decompiled C code
-- `/api/function/<ea>/callers` — who calls this function
-- `/api/function/<ea>/callees` — what this function calls  
-- `/api/function/<ea>/xrefs-to` — all cross-references to address
-- `/api/strings` — all strings (accepts ?filter= param)
-- `/api/imports` — imported functions
-- `/api/exports` — exported functions
-- `/api/bytes/<ea>/<size>` — raw bytes at address
-
-**Writing data:**
-- `/api/function/<ea>/rename` POST `{"name": "..."}` — rename function
-- `/api/function/<ea>/comment` POST `{"comment": "..."}` — add comment
-- `/api/exec` POST `{"script": "..."}` — execute any IDAPython
-- `/api/undo` POST — undo last change
-- `/api/save` POST — save IDA database
-
-### Tips for the Agent
-
-1. Always start with `ping` before any analysis
-2. Use `info` to understand what you're looking at
-3. Decompile entry point first to find the program's starting logic
-4. Follow cross-references to trace data flow
-5. Search strings for clues (API names, error messages, URLs, IPs)
-6. Rename functions as you understand them — this helps you track your progress
-7. If a function is too complex, break it down by looking at its callees
-8. Use `exec` for anything the REST API doesn't cover
+The complete API is available through `python cli.py schema` and
+`api_schema.json`.

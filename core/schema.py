@@ -11,6 +11,7 @@ Changes (v5.2):
 
 import os
 import json
+import sys
 from typing import Dict, Any, Tuple, Optional
 
 
@@ -20,7 +21,11 @@ class SchemaLoader:
     def __init__(self, schema_path: Optional[str] = None):
         if schema_path is None:
             base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            schema_path = os.path.join(base, "api_schema.json")
+            candidates = (
+                os.path.join(base, "api_schema.json"),
+                os.path.join(sys.prefix, "share", "antigravity-ida-bridge", "api_schema.json"),
+            )
+            schema_path = next((path for path in candidates if os.path.isfile(path)), candidates[0])
 
         self.schema_path = schema_path
         self._schema: Optional[Dict[str, Any]] = None

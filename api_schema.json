@@ -1,11 +1,11 @@
 {
   "meta": {
     "name": "Antigravity IDA Bridge",
-    "version": "4.0",
+    "version": "6.0.0",
     "base_url": "http://127.0.0.1:13370",
     "description": "Full IDA Pro SDK API exposed via REST. All addresses are hex strings (e.g. '0x140001000'). All responses are JSON."
   },
-  "system_prompt": "You are an expert reverse engineering AI agent with direct programmatic access to IDA Pro via the Antigravity Bridge HTTP API. You can read disassembly, decompile functions, inspect types, modify the database, run the debugger, and execute arbitrary IDAPython scripts. Always use structured API calls when a dedicated endpoint exists. Fall back to /api/exec only for operations not covered by dedicated endpoints. When analyzing binaries: 1) Start with /api/info to understand the target. 2) Use /api/functions-page to browse functions. 3) Decompile interesting functions and analyze their ctree/microcode. 4) Follow cross-references to map call chains. 5) Rename and comment as you discover functionality. 6) Use /api/batch for bulk mutations. Think step by step. Verify your hypotheses by examining xrefs, strings, and call graphs before making conclusions.",
+  "system_prompt": "You are an expert reverse engineering AI agent with direct programmatic access to IDA Pro via the Antigravity Bridge HTTP API. You can read disassembly, decompile functions, inspect types, modify the database, and run the debugger. Always use structured API calls when a dedicated endpoint exists. The /api/exec endpoint is disabled by default and may only be used when the user has explicitly enabled dynamic execution. When analyzing binaries: 1) Start with /api/info to understand the target. 2) Use /api/functions-page to browse functions. 3) Decompile interesting functions and analyze their ctree/microcode. 4) Follow cross-references to map call chains. 5) Rename and comment as you discover functionality. 6) Use /api/batch for bulk mutations. Verify hypotheses with xrefs, strings, and call graphs before drawing conclusions.",
   "capabilities": [
     "Decompile any function to C pseudocode",
     "Get AST (ctree) of decompiled functions for pattern matching",
@@ -17,7 +17,7 @@
     "Navigate cross-references (code + data)",
     "Inspect vtables, call graphs, basic blocks (CFG)",
     "Full debugger control: breakpoints, stepping, registers, memory",
-    "Execute arbitrary IDAPython scripts via /api/exec",
+    "Optionally execute IDAPython scripts via /api/exec when explicitly enabled",
     "Batch mutations with rollback support",
     "Manage segments, type libraries, bookmarks"
   ],
@@ -109,14 +109,14 @@
       {"method":"POST","path":"/api/delete-enum","desc":"Delete enum","body":{"name":"string"}},
       {"method":"POST","path":"/api/add-bookmark","desc":"Add bookmark","body":{"ea":"0x...","description":"string"}},
       {"method":"POST","path":"/api/delete-bookmark","desc":"Delete bookmark","body":{"slot":0}},
-      {"method":"POST","path":"/api/import-header","desc":"Import C header file","body":{"path":"C:/path/to/header.h"}},
+      {"method":"POST","path":"/api/import-header","desc":"Import a C header from a directory configured in IDA_BRIDGE_ALLOWED_IMPORT_ROOTS","body":{"path":"C:/trusted/path/header.h"}},
       {"method":"POST","path":"/api/reanalyze","desc":"Force reanalysis of range","body":{"start":"0x...","end":"0x..."}},
       {"method":"POST","path":"/api/save","desc":"Save IDA database","body":{}},
       {"method":"POST","path":"/api/undo","desc":"Undo last action","body":{}},
       {"method":"POST","path":"/api/redo","desc":"Redo action","body":{}},
       {"method":"POST","path":"/api/navigate","desc":"Move cursor to address","body":{"ea":"0x..."}},
       {"method":"POST","path":"/api/batch","desc":"Execute batch mutations atomically with rollback. Ops: rename-func, comment-func, comment, rename-var, create-struct, set-type","body":{"mutations":[{"op":"rename-func","ea":"0x...","name":"new_name"}]}},
-      {"method":"POST","path":"/api/exec","desc":"Execute arbitrary IDAPython script. Full IDA SDK access. Use result dict to return data. Print statements captured in stdout.","body":{"script":"import ida_funcs\\nresult['count'] = ida_funcs.get_func_qty()"}},
+      {"method":"POST","path":"/api/exec","desc":"Execute IDAPython with full SDK access when IDA_BRIDGE_ALLOW_EXEC=1. Use result dict to return data. Print statements are captured.","body":{"script":"import ida_funcs\\nresult['count'] = ida_funcs.get_func_qty()"}},
       {"method":"POST","path":"/api/dbg/start","desc":"Start process (debugger)","body":{"path":"optional","args":"","sdir":"optional"}},
       {"method":"POST","path":"/api/dbg/attach","desc":"Attach to process","body":{"pid":1234}},
       {"method":"POST","path":"/api/dbg/detach","desc":"Detach from process","body":{}},
@@ -189,7 +189,7 @@
     }
   ],
   "tips": [
-    "Use /api/exec for anything not covered by dedicated endpoints — it gives full IDAPython access",
+    "Prefer dedicated endpoints; /api/exec requires IDA_BRIDGE_ALLOW_EXEC=1 and grants full IDAPython access",
     "Use /api/batch for bulk operations — it's atomic and supports rollback",
     "Always check /api/info first to know if Hex-Rays (decompiler) is available",
     "Use /api/function/<ea>/ctree for pattern matching instead of parsing pseudocode text",

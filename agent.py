@@ -8,6 +8,8 @@ Supports OpenAI, DeepSeek, Anthropic, Gemini, and Ollama.
 import os
 import json
 import logging
+import argparse
+import sys
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Type, Union
 
@@ -93,6 +95,15 @@ class AgentBackend(ABC):
         }
 
     @classmethod
+    def get_backend(cls, name: str) -> Type['AgentBackend']:
+        """Return a registered backend or raise a clear lookup error."""
+        try:
+            return cls._registry[name]
+        except KeyError as exc:
+            available = ", ".join(sorted(cls._registry))
+            raise ValueError(f"Unknown backend '{name}'. Available: {available}") from exc
+
+    @classmethod
     def auto_select(cls) -> Optional[str]:
         priority = ["ollama", "gemini", "openai", "anthropic", "deepseek"]
         for name in priority:
@@ -135,7 +146,10 @@ class AgentBackend(ABC):
                 "type": "function",
                 "function": {
                     "name": "execute_idapython",
-                    "description": "Execute arbitrary IDAPython script in IDA Pro.",
+                    "description": (
+                        "Execute IDAPython in IDA Pro only when the bridge owner has explicitly "
+                        "enabled IDA_BRIDGE_ALLOW_EXEC. Prefer structured endpoints."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -194,6 +208,9 @@ class AgentBackend(ABC):
 
     def call_bridge_api(self, method: str, path: str, body: Union[str, dict] = "{}") -> str:
         logger.info(f"[{self.get_name()}] Bridge call: {method} {path}")
+
+        if not path.startswith("/api/"):
+            return json.dumps({"error": "Bridge path must start with /api/", "success": False})
         
         if isinstance(body, str):
             try:
@@ -215,8 +232,8 @@ class AgentBackend(ABC):
         instructions = (
             "You have two tools:\n"
             "1. `call_bridge_api` — Use for structured REST endpoint interactions.\n"
-            "2. `execute_idapython` — Use for custom IDA logic via Python API.\n"
-            "Prefer `call_bridge_api` if an endpoint exists."
+            "2. `execute_idapython` — Available only when the bridge owner explicitly enables it.\n"
+            "Prefer `call_bridge_api` whenever an endpoint exists."
         )
         return self.schema.generate_system_prompt(instructions)
 
@@ -466,31 +483,60 @@ class AnthropicBackend(AgentBackend):
 
         return "[Agent reached max iterations]"
 
-if __name__ == "__main__":
-    # Example chat loop if run directly
-    backend_name = AgentBackend.auto_select()
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Interactive Antigravity IDA agent")
+    parser.add_argument("--backend", choices=sorted(AgentBackend._registry), help="AI backend")
+    parser.add_argument("--model", help="Provider model override")
+    parser.add_argument("--url", help="IDA Bridge URL override")
+    parser.add_argument("--list-backends", action="store_true", help="List backend availability and exit")
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.list_backends:
+        print(json.dumps(AgentBackend.list_backends(), indent=2))
+        return 0
+
+    backend_name = args.backend or AgentBackend.auto_select()
     if not backend_name:
         print("No AI backends available. Set API keys.")
-        exit(1)
-        
+        return 1
+
     backend_cls = AgentBackend.get_backend(backend_name)
-    agent = backend_cls()
+    if not backend_cls.is_available():
+        print(f"Backend '{backend_name}' is unavailable. Install its SDK and configure credentials/service.")
+        return 1
+
+    bridge = BridgeClient(url=args.url)
+    agent = backend_cls(client=bridge, model=args.model)
     print(f"Started interactive session with {backend_cls.get_name()} ({agent.model}).")
-    
-    while True:
-        try:
-            user_input = input("\n[You]> ")
-            if user_input.lower() in ["quit", "exit"]:
+
+    try:
+        while True:
+            try:
+                user_input = input("\n[You]> ")
+            except EOFError:
                 break
-            elif user_input.lower() in ["clear", "reset"]:
+            if user_input.lower() in ("quit", "exit"):
+                break
+            if user_input.lower() in ("clear", "reset"):
                 agent.reset()
                 print("--- Context cleared ---")
                 continue
-                
-            response = agent.chat(user_input)
-            print(f"\n[Agent]> {response}")
-            
-        except KeyboardInterrupt:
-            break
-        except Exception as e:
-            print(f"Error: {e}")
+
+            try:
+                response = agent.chat(user_input)
+                print(f"\n[Agent]> {response}")
+            except Exception as exc:
+                logger.exception("Agent request failed")
+                print(f"Error: {exc}", file=sys.stderr)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        bridge.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

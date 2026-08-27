@@ -1,4 +1,8 @@
 __pycache__/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
 *.pyc
 *.pyo
 *.egg-info/
@@ -13,3 +17,4 @@ build/
 *.nam
 *.til
 .antigravity_token
+*.log
