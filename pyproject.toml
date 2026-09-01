@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "antigravity-ida-bridge"
-version = "6.0.0"
+name = "ph4ntom-ida-bridge"
+version = "6.1.0"
 description = "Local REST, CLI, MCP, and agent bridge for IDA Pro"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,13 +25,13 @@ swarm = ["google-genai>=1", "pydantic>=2,<3"]
 dev = ["flake8>=7,<8", "pytest>=8,<10"]
 
 [project.scripts]
-antigravity-ida = "cli:main"
+ph4ntom-ida = "cli:main"
 
 [tool.setuptools]
 py-modules = ["agent", "cli", "mcp_server", "server", "swarm_worker"]
 
 [tool.setuptools.data-files]
-"share/antigravity-ida-bridge" = ["AGENT_SKILL.md", "agent_config.json", "api_schema.json"]
+"share/ph4ntom-ida-bridge" = ["AGENT_SKILL.md", "agent_config.json", "api_schema.json"]
 
 [tool.setuptools.packages.find]
 include = ["core*", "ida_plugin*", "integrations*"]

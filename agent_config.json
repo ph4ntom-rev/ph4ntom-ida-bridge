@@ -1,17 +1,17 @@
 {
-  "name": "Antigravity IDA Bridge",
-  "version": "6.0.0",
+  "name": "ph4ntom IDA Bridge",
+  "version": "6.1.0",
   "description": "AI agent interface to IDA Pro reverse engineering environment",
   "bridge_url": "http://127.0.0.1:13370",
   "auth": {
     "type": "bearer",
-    "token_file": "~/.antigravity_token",
+    "token_file": "~/.ph4ntom_ida_bridge_token",
     "note": "Token is auto-generated when IDA plugin starts. Read from file and send as Authorization: Bearer <token>"
   },
 
   "integration_modes": {
     "ide_agent": {
-      "description": "For AI IDE agents (Antigravity IDE, Cursor, Windsurf). The IDE agent reads this config and calls cli.py via shell commands.",
+      "description": "For AI IDE agents (ph4ntom IDE, Cursor, Windsurf). The IDE agent reads this config and calls cli.py via shell commands.",
       "tool": "cli.py",
       "skill_file": "AGENT_SKILL.md",
       "usage": "python cli.py <command> [args]"

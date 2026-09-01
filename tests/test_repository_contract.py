@@ -10,9 +10,9 @@ def test_schema_and_project_versions_match():
     schema = json.loads((ROOT / "api_schema.json").read_text(encoding="utf-8"))
     agent_config = json.loads((ROOT / "agent_config.json").read_text(encoding="utf-8"))
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert schema["meta"]["version"] == "6.0.0"
-    assert agent_config["version"] == "6.0.0"
-    assert 'version = "6.0.0"' in pyproject
+    assert schema["meta"]["version"] == "6.1.0"
+    assert agent_config["version"] == "6.1.0"
+    assert 'version = "6.1.0"' in pyproject
 
 
 def test_schema_declares_expected_endpoint_coverage():
@@ -22,7 +22,7 @@ def test_schema_declares_expected_endpoint_coverage():
 
 
 def test_plugin_has_one_function_router_per_http_method():
-    source = (ROOT / "ida_plugin" / "antigravity_server.py").read_text(encoding="utf-8")
+    source = (ROOT / "ida_plugin" / "ph4ntom_ida_bridge.py").read_text(encoding="utf-8")
     assert source.count("@get_route(r'/api/function/.*')") == 1
     assert source.count("@post_route(r'/api/function/.*')") == 1
     for action in ("ctree", "lvar-map", "microcode", "callers", "callees", "strings-used"):
@@ -32,7 +32,7 @@ def test_plugin_has_one_function_router_per_http_method():
 
 
 def test_plugin_security_guards_are_present():
-    source = (ROOT / "ida_plugin" / "antigravity_server.py").read_text(encoding="utf-8")
+    source = (ROOT / "ida_plugin" / "ph4ntom_ida_bridge.py").read_text(encoding="utf-8")
     assert "secrets.compare_digest" in source
     assert "MAX_BODY_SIZE" in source
     assert "IDA_BRIDGE_ALLOW_EXEC" in source

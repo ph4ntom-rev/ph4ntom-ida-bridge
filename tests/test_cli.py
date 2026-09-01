@@ -42,7 +42,7 @@ def test_install_plugin_copies_plugin_and_schema(tmp_path):
     result = cli.install_plugin(str(ida_executable))
 
     assert result["success"] is True
-    assert (ida_dir / "plugins" / "antigravity_server.py").is_file()
+    assert (ida_dir / "plugins" / "ph4ntom_ida_bridge.py").is_file()
     assert (ida_dir / "plugins" / "api_schema.json").is_file()
 
 
@@ -52,7 +52,7 @@ def test_install_plugin_requires_force_for_differing_file(tmp_path):
     plugin_dir.mkdir(parents=True)
     ida_executable = ida_dir / "ida64.exe"
     ida_executable.write_bytes(b"")
-    destination = plugin_dir / "antigravity_server.py"
+    destination = plugin_dir / "ph4ntom_ida_bridge.py"
     destination.write_text("custom", encoding="utf-8")
 
     result = cli.install_plugin(str(ida_executable))

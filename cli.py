@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Command-line interface for Antigravity IDA Bridge."""
+"""Command-line interface for ph4ntom IDA Bridge."""
 
 from __future__ import annotations
 
@@ -18,13 +18,13 @@ from typing import Any, Dict, Iterable, Optional
 from core.client import BridgeClient
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-PLUGIN_SOURCE = PROJECT_ROOT / "ida_plugin" / "antigravity_server.py"
+PLUGIN_SOURCE = PROJECT_ROOT / "ida_plugin" / "ph4ntom_ida_bridge.py"
 SCHEMA_SOURCE = next(
     (
         path
         for path in (
             PROJECT_ROOT / "api_schema.json",
-            Path(sys.prefix) / "share" / "antigravity-ida-bridge" / "api_schema.json",
+            Path(sys.prefix) / "share" / "ph4ntom-ida-bridge" / "api_schema.json",
         )
         if path.is_file()
     ),
@@ -170,7 +170,7 @@ def _wait_for_bridge(client: BridgeClient, timeout: float) -> Dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Control IDA Pro through Antigravity IDA Bridge")
+    parser = argparse.ArgumentParser(description="Control IDA Pro through ph4ntom IDA Bridge")
     parser.add_argument("--url", default=None, help="Bridge URL (default: IDA_BRIDGE_URL or localhost)")
     parser.add_argument("--timeout", type=float, default=30, help="HTTP timeout in seconds")
     parser.add_argument("--token", default=None, help="Bearer token override")

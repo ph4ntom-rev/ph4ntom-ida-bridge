@@ -3,7 +3,7 @@ import json
 from core.client import BridgeClient
 
 def main():
-    print("=== Antigravity IDA Bridge Verification ===")
+    print("=== ph4ntom IDA Bridge Verification ===")
     client = BridgeClient()
     print(f"Server URL: {client.base_url}")
     
@@ -14,7 +14,7 @@ def main():
         print(f"FAILED: Could not connect to bridge. Reason: {ping_res['error']}")
         print("\nPlease ensure:")
         print("1. IDA Pro is running.")
-        print("2. The Antigravity Bridge plugin is loaded (Ctrl+Shift+A pressed inside IDA).")
+        print("2. The ph4ntom Bridge plugin is loaded (Ctrl+Shift+A pressed inside IDA).")
         print("3. Check that the port matches (default 13370).")
         sys.exit(1)
         

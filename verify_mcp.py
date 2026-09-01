@@ -7,7 +7,7 @@ sys.path.append(str(Path(__file__).parent))
 try:
     import asyncio
     from mcp_server import mcp
-    print("=== Antigravity IDA Bridge MCP Tools Verification ===")
+    print("=== ph4ntom IDA Bridge MCP Tools Verification ===")
     print(f"Server Name: {mcp.name}")
     
     tools = asyncio.run(mcp.list_tools())

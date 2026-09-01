@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Antigravity IDA Bridge — Swarm Worker (Optimized)
+ph4ntom IDA Bridge — Swarm Worker (Optimized)
 ===================================================
 Batch AI analysis of unnamed functions using Gemini.
 
@@ -143,7 +143,7 @@ def process_batch(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Antigravity Swarm Worker")
+    parser = argparse.ArgumentParser(description="ph4ntom Swarm Worker")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--apply", action="store_true", help="Apply proposed renames/comments to IDA")

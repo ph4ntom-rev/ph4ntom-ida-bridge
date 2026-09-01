@@ -1,4 +1,4 @@
-"""Antigravity IDA Bridge — Core Package."""
+"""ph4ntom IDA Bridge — Core Package."""
 from .client import BridgeClient
 from .schema import SchemaLoader
 

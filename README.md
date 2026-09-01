@@ -1,13 +1,13 @@
-# Antigravity IDA Bridge
+# ph4ntom IDA Bridge
 
-Antigravity IDA Bridge is a localhost-only control layer for IDA Pro 9.x. It
+ph4ntom IDA Bridge is a localhost-only control layer for IDA Pro 9.x. It
 combines a self-contained IDA plugin, a JSON REST API, a Python client, a CLI,
 54 MCP tools, and optional standalone AI backends.
 
 The API schema currently documents 54 read endpoints and 48 write endpoints.
-IDA-specific behavior still needs to be tested inside a real IDA installation;
-the repository test suite validates the client, CLI, schema, routing contract,
-MCP registration, and security defaults without requiring IDA.
+The bridge has been validated against IDA Professional 9.3 in addition to the
+repository test suite, which covers the client, CLI, schema, routing contract,
+MCP registration, packaging, and security defaults.
 
 ## Security model
 
@@ -17,7 +17,7 @@ The bridge runs inside IDA, so authenticated write access is powerful. The
 Version 6 uses these defaults:
 
 - binds only to `127.0.0.1:13370`;
-- creates a 256-bit session token in `~/.antigravity_token`;
+- creates a 256-bit session token in `~/.ph4ntom_ida_bridge_token`;
 - refreshes stale tokens automatically after an IDA restart;
 - limits POST bodies to 5 MiB;
 - permits browser CORS only from localhost origins;
@@ -31,7 +31,7 @@ See [SECURITY.md](SECURITY.md) for the full guidance.
 
 | Path | Purpose |
 | --- | --- |
-| `ida_plugin/antigravity_server.py` | Canonical IDA plugin and REST server |
+| `ida_plugin/ph4ntom_ida_bridge.py` | Canonical IDA plugin and REST server |
 | `api_schema.json` | Machine-readable REST reference |
 | `core/client.py` | Shared authenticated HTTP client |
 | `cli.py` | CLI, plugin installer, and IDA launcher |
@@ -42,7 +42,7 @@ See [SECURITY.md](SECURITY.md) for the full guidance.
 | `AGENT_SKILL.md` | Instructions for IDE-based agents |
 
 `server.py` remains only as a compatibility wrapper. All server changes belong
-in `ida_plugin/antigravity_server.py` so the two implementations cannot drift.
+in `ida_plugin/ph4ntom_ida_bridge.py` so the two implementations cannot drift.
 
 ## Install
 
@@ -50,8 +50,8 @@ Python 3.10 or newer is required for the external tools. IDA itself supplies
 the IDAPython modules used by the plugin.
 
 ```bash
-git clone https://github.com/ph4ntom-rev/antigravity-ida-bridge.git
-cd antigravity-ida-bridge
+git clone https://github.com/ph4ntom-rev/ph4ntom-ida-bridge.git
+cd ph4ntom-ida-bridge
 python -m pip install -e .
 ```
 
@@ -68,7 +68,7 @@ Manual installation is also supported: copy both files below into IDA's
 `plugins` directory.
 
 ```text
-ida_plugin/antigravity_server.py
+ida_plugin/ph4ntom_ida_bridge.py
 api_schema.json
 ```
 
@@ -92,7 +92,7 @@ python cli.py api POST /api/function/0x140001000/rename --body "{\"name\":\"init
 The installed console command is equivalent:
 
 ```bash
-antigravity-ida ping
+ph4ntom-ida ping
 ```
 
 To launch IDA without silently installing or replacing anything:
@@ -156,7 +156,7 @@ Use absolute paths in the MCP client configuration:
   "mcpServers": {
     "ida-bridge": {
       "command": "python",
-      "args": ["C:/path/to/antigravity-ida-bridge/mcp_server.py"]
+      "args": ["C:/path/to/ph4ntom-ida-bridge/mcp_server.py"]
     }
   }
 }

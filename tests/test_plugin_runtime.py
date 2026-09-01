@@ -10,7 +10,7 @@ import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_PATH = ROOT / "ida_plugin" / "antigravity_server.py"
+PLUGIN_PATH = ROOT / "ida_plugin" / "ph4ntom_ida_bridge.py"
 
 
 class _Hook:
@@ -64,7 +64,7 @@ def _load_plugin(monkeypatch, tmp_path):
 
     token_file = tmp_path / "bridge-token"
     monkeypatch.setenv("IDA_BRIDGE_TOKEN_FILE", str(token_file))
-    module_name = "antigravity_test_" + uuid.uuid4().hex
+    module_name = "ph4ntom_test_" + uuid.uuid4().hex
     spec = importlib.util.spec_from_file_location(module_name, PLUGIN_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

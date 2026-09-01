@@ -1,5 +1,5 @@
 # ============================================================
-# Antigravity IDA Bridge — Requirements
+# ph4ntom IDA Bridge — Requirements
 # ============================================================
 # Install all: pip install -r requirements.txt
 # Install minimal: pip install requests

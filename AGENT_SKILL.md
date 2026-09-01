@@ -1,8 +1,8 @@
-# Antigravity IDE ↔ IDA Bridge agent guide
+# ph4ntom IDE ↔ IDA Bridge agent guide
 
 Use `cli.py` to communicate with the REST server running inside IDA Pro at
 `http://127.0.0.1:13370`. Commands return JSON and automatically load the
-session token from `~/.antigravity_token`.
+session token from `~/.ph4ntom_ida_bridge_token`.
 
 ## Safety rules
 

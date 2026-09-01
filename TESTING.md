@@ -10,7 +10,7 @@ python -m pip install -e ".[dev,mcp]"
 python cli.py install-plugin --ida-dir "C:\Path\To\IDA" --force
 ```
 
-The installer should report both `antigravity_server.py` and `api_schema.json`.
+The installer should report both `ph4ntom_ida_bridge.py` and `api_schema.json`.
 Existing differing files are backed up with a `.bak` suffix.
 
 ## 2. Start and authenticate
@@ -32,7 +32,7 @@ Expected `ping` fields include:
 ```json
 {
   "status": "ok",
-  "version": "6.0.0",
+  "version": "6.1.0",
   "auth_enabled": true,
   "dynamic_exec_enabled": false
 }

@@ -1,5 +1,5 @@
 """
-Antigravity-IDA Bridge Server Plugin
+ph4ntom IDA Bridge Server Plugin
 =====================================
 Lightweight HTTP server running inside IDA Pro 9.x.
 All operations are thread-safe via ida_kernwin.execute_sync().
@@ -52,7 +52,7 @@ except ImportError:
 
 HOST = "127.0.0.1"
 PORT = 13370
-BRIDGE_VERSION = "6.0.0"
+BRIDGE_VERSION = "6.1.0"
 MAX_FUNCTIONS = 5000
 MAX_STRINGS = 2000
 MAX_BODY_SIZE = 5 * 1024 * 1024
@@ -102,8 +102,8 @@ def _write_secure_token(token):
     if configured:
         candidates.append(os.path.abspath(os.path.expanduser(configured)))
     candidates.extend([
-        os.path.join(os.path.expanduser("~"), ".antigravity_token"),
-        os.path.join(tempfile.gettempdir(), ".antigravity_token"),
+        os.path.join(os.path.expanduser("~"), ".ph4ntom_ida_bridge_token"),
+        os.path.join(tempfile.gettempdir(), ".ph4ntom_ida_bridge_token"),
     ])
 
     last_error = None
@@ -853,7 +853,7 @@ def _do_rollback(actions):
             elif action[0] == "rename-var":
                 rename_local_var(action[1], action[2], action[3])
         except Exception as exc:
-            ida_kernwin.msg("[Antigravity] Rollback action failed: " + str(exc) + "\n")
+            ida_kernwin.msg("[ph4ntom] Rollback action failed: " + str(exc) + "\n")
 
 # ─── Extended Sensor Functions ───────────────────────────────────────────────
 
@@ -1845,22 +1845,22 @@ def route_macro_analyze_context(self, match, params):
     ea = parse_ea(params.get("ea", ["0"])[0])
     self.send_json(get_analyze_context(ea)())
 
-class AntigravityUIHooks(ida_kernwin.UI_Hooks):
+class Ph4ntomUIHooks(ida_kernwin.UI_Hooks):
     def screen_ea_changed(self, ea, prev_ea):
         _publish_event({"event": "cursor_changed", "ea": hex(ea), "prev_ea": hex(prev_ea)})
         return 0
 
 try:
     import ida_dbg
-    class AntigravityDbgHooks(ida_dbg.DbgHooks):
+    class Ph4ntomDbgHooks(ida_dbg.DbgHooks):
         def dbg_bpt(self, tid, ea):
             _publish_event({"event": "breakpoint_hit", "tid": tid, "ea": hex(ea)})
             return 0
-    dbg_hooks = AntigravityDbgHooks()
+    dbg_hooks = Ph4ntomDbgHooks()
 except Exception:
     dbg_hooks = None
 
-ui_hooks = AntigravityUIHooks()
+ui_hooks = Ph4ntomUIHooks()
 
 @get_route(r'/api/info')
 def route_do_get_0(self, match, params):
@@ -1924,7 +1924,7 @@ def route_do_get_13(self, match, params):
 def route_do_get_14(self, match, params):
     self.send_json({
         'status': 'ok',
-        'server': 'antigravity-ida-bridge',
+        'server': 'ph4ntom-ida-bridge',
         'version': BRIDGE_VERSION,
         'auth_enabled': AUTH_ENABLED,
         'dynamic_exec_enabled': ALLOW_SCRIPT_EXECUTION,
@@ -2426,14 +2426,14 @@ def route_events(self, match, params):
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
-    """HTTP handler for the Antigravity-IDA Bridge."""
+    """HTTP handler for the ph4ntom IDA Bridge."""
 
-    server_version = "AntigravityIDABridge/" + BRIDGE_VERSION
+    server_version = "ph4ntomIDABridge/" + BRIDGE_VERSION
 
     def log_message(self, format, *args):
         """Log to IDA output window."""
         msg = format % args
-        safe_read(lambda: ida_kernwin.msg(f"[Antigravity] {msg}\n"))
+        safe_read(lambda: ida_kernwin.msg(f"[ph4ntom] {msg}\n"))
 
     def send_json(self, data, status=200):
         payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -2594,14 +2594,14 @@ def start_server(host=HOST, port=PORT):
     """Start the HTTP server in a background thread."""
     global _server, _thread
     if _server is not None:
-        print(f"[Antigravity] Server already running on {host}:{port}")
+        print(f"[ph4ntom] Server already running on {host}:{port}")
         return
 
     try:
         server = BridgeHTTPServer((host, port), BridgeHandler)
         thread = threading.Thread(
             target=server.serve_forever,
-            name="antigravity-ida-bridge",
+            name="ph4ntom-ida-bridge",
             daemon=True,
         )
         thread.start()
@@ -2622,11 +2622,11 @@ def start_server(host=HOST, port=PORT):
         _unhook_events()
         raise
 
-    print(f"[Antigravity] ✅ Bridge server started on http://{host}:{port}")
-    print(f"[Antigravity] 🔑 Token file: {_token_path}")
-    print(f"[Antigravity] Dynamic execution: {'enabled' if ALLOW_SCRIPT_EXECUTION else 'disabled'}")
-    print("[Antigravity] Endpoints: /api/info, /api/functions, /api/function/<ea>/pseudocode, ...")
-    ida_kernwin.msg(f"[Antigravity] Bridge server started on http://{host}:{port}\n")
+    print(f"[ph4ntom] ✅ Bridge server started on http://{host}:{port}")
+    print(f"[ph4ntom] 🔑 Token file: {_token_path}")
+    print(f"[ph4ntom] Dynamic execution: {'enabled' if ALLOW_SCRIPT_EXECUTION else 'disabled'}")
+    print("[ph4ntom] Endpoints: /api/info, /api/functions, /api/function/<ea>/pseudocode, ...")
+    ida_kernwin.msg(f"[ph4ntom] Bridge server started on http://{host}:{port}\n")
 
 def stop_server():
     """Stop the HTTP server."""
@@ -2644,20 +2644,20 @@ def stop_server():
 
     _unhook_events()
     if server is not None:
-        print("[Antigravity] Server stopped.")
-        ida_kernwin.msg("[Antigravity] Bridge server stopped.\n")
+        print("[ph4ntom] Server stopped.")
+        ida_kernwin.msg("[ph4ntom] Bridge server stopped.\n")
 
 # ─── IDA Plugin Interface ────────────────────────────────────────────────────
 
-class AntigravityPlugin(ida_idaapi.plugin_t):
+class Ph4ntomPlugin(ida_idaapi.plugin_t):
     flags = ida_idaapi.PLUGIN_KEEP
-    comment = "Antigravity-IDA Bridge Server"
+    comment = "ph4ntom IDA Bridge Server"
     help = "Starts an HTTP server for external AI agent control"
-    wanted_name = "Antigravity Bridge"
+    wanted_name = "ph4ntom Bridge"
     wanted_hotkey = "Ctrl-Shift-A"
 
     def init(self):
-        print("[Antigravity] Plugin loaded. Press Ctrl+Shift+A to toggle server.")
+        print("[ph4ntom] Plugin loaded. Press Ctrl+Shift+A to toggle server.")
         return ida_idaapi.PLUGIN_KEEP
 
     def run(self, arg):
@@ -2670,7 +2670,7 @@ class AntigravityPlugin(ida_idaapi.plugin_t):
         stop_server()
 
 def PLUGIN_ENTRY():
-    return AntigravityPlugin()
+    return Ph4ntomPlugin()
 
 # ─── Script Mode (File > Script File) ────────────────────────────────────────
 # If run directly as a script, start the server immediately.

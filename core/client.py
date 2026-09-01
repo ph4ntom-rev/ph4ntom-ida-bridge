@@ -22,7 +22,7 @@ DEFAULT_TIMEOUT = 30
 
 
 class BridgeClient:
-    """Resilient client for the local Antigravity IDA Bridge API.
+    """Resilient client for the local ph4ntom IDA Bridge API.
 
     A lock serializes access to the underlying ``requests.Session``. If IDA is
     restarted and rotates its token, the client reloads the token after the
@@ -82,8 +82,8 @@ class BridgeClient:
         if self._explicit_token_file:
             candidates.append(Path(self._explicit_token_file).expanduser())
         candidates.extend((
-            Path.home() / ".antigravity_token",
-            Path(tempfile.gettempdir()) / ".antigravity_token",
+            Path.home() / ".ph4ntom_ida_bridge_token",
+            Path(tempfile.gettempdir()) / ".ph4ntom_ida_bridge_token",
         ))
         for candidate in candidates:
             key = os.path.normcase(os.path.abspath(str(candidate)))

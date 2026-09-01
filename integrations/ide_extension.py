@@ -1,10 +1,10 @@
 """
-Antigravity IDA Bridge — IDE Extension Bridge
+ph4ntom IDA Bridge — IDE Extension Bridge
 ===============================================
-Integration layer for Antigravity IDE / VS Code / Cursor.
+Integration layer for ph4ntom IDE / VS Code / Cursor.
 
 Provides:
-- Workspace config auto-discovery (.antigravity/config.json)
+- Workspace config auto-discovery (.ph4ntom_ida_bridge/config.json)
 - IDA Bridge status panel data
 - Function list / decompilation for IDE sidepanel
 - Bidirectional sync (renames, comments, types)
@@ -50,8 +50,8 @@ class IDEBridge:
         self.client = BridgeClient(url=self.config["ida_bridge"]["url"])
 
     def _load_config(self) -> dict:
-        """Load config from workspace .antigravity/config.json"""
-        config_path = os.path.join(self.workspace, ".antigravity", "config.json")
+        """Load config from workspace .ph4ntom_ida_bridge/config.json"""
+        config_path = os.path.join(self.workspace, ".ph4ntom_ida_bridge", "config.json")
         merged = copy.deepcopy(DEFAULT_CONFIG)
         if os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
@@ -64,8 +64,8 @@ class IDEBridge:
         return merged
 
     def init_workspace(self):
-        """Create .antigravity/ config directory in workspace."""
-        config_dir = os.path.join(self.workspace, ".antigravity")
+        """Create .ph4ntom_ida_bridge/ config directory in workspace."""
+        config_dir = os.path.join(self.workspace, ".ph4ntom_ida_bridge")
         os.makedirs(config_dir, exist_ok=True)
         config_path = os.path.join(config_dir, "config.json")
         if not os.path.exists(config_path):
@@ -111,13 +111,13 @@ class IDEBridge:
         return self.client.post(f"/api/function/{ea}/comment", {"comment": comment})
 
 
-# ── VS Code / Antigravity IDE settings templates ─────────────────────────
+# ── VS Code / ph4ntom IDE settings templates ─────────────────────────
 
 VSCODE_SETTINGS = {
-    "antigravity.idaBridge.enabled": True,
-    "antigravity.idaBridge.url": "http://127.0.0.1:13370",
-    "antigravity.idaBridge.autoConnect": True,
-    "antigravity.idaBridge.syncRenames": True,
+    "ph4ntom.idaBridge.enabled": True,
+    "ph4ntom.idaBridge.url": "http://127.0.0.1:13370",
+    "ph4ntom.idaBridge.autoConnect": True,
+    "ph4ntom.idaBridge.syncRenames": True,
 }
 
 CURSOR_MCP_CONFIG = {
@@ -132,7 +132,7 @@ CURSOR_MCP_CONFIG = {
 
 def generate_ide_configs(workspace: str = "."):
     """Generate IDE config files for current workspace."""
-    # .antigravity/config.json
+    # .ph4ntom_ida_bridge/config.json
     bridge = IDEBridge(workspace)
     config_path = bridge.init_workspace()
 

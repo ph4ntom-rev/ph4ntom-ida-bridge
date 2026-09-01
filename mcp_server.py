@@ -1,5 +1,5 @@
 """
-Antigravity IDA Bridge — MCP Server
+ph4ntom IDA Bridge — MCP Server
 ====================================
 Model Context Protocol server that exposes 54 IDA Pro tools
 to any MCP-compatible AI client (Claude Desktop, Cursor, Cline, etc.)
@@ -30,7 +30,7 @@ def _component(value: object) -> str:
 
 # ─── MCP Server ──────────────────────────────────────────────────────────────
 
-mcp = FastMCP("Antigravity IDA Bridge")
+mcp = FastMCP("ph4ntom IDA Bridge")
 
 # ─── Resources ───────────────────────────────────────────────────────────────
 

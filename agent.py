@@ -1,5 +1,5 @@
 """
-Antigravity IDA Bridge — Agent Backends
+ph4ntom IDA Bridge — Agent Backends
 ===========================================
 Unified, fault-tolerant backend architecture for AI Agents.
 Supports OpenAI, DeepSeek, Anthropic, Gemini, and Ollama.
@@ -17,7 +17,7 @@ from core.client import BridgeClient
 from core.schema import SchemaLoader
 
 # Настройка логгера
-logger = logging.getLogger("Antigravity.Bridge")
+logger = logging.getLogger("ph4ntom.Bridge")
 
 # ── Флаги доступности SDK ──────────────────────────────────────────────
 try:
@@ -130,7 +130,7 @@ class AgentBackend(ABC):
                 "type": "function",
                 "function": {
                     "name": "call_bridge_api",
-                    "description": "Call any Antigravity IDA Bridge REST endpoint.",
+                    "description": "Call any ph4ntom IDA Bridge REST endpoint.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -484,7 +484,7 @@ class AnthropicBackend(AgentBackend):
         return "[Agent reached max iterations]"
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Interactive Antigravity IDA agent")
+    parser = argparse.ArgumentParser(description="Interactive ph4ntom IDA agent")
     parser.add_argument("--backend", choices=sorted(AgentBackend._registry), help="AI backend")
     parser.add_argument("--model", help="Provider model override")
     parser.add_argument("--url", help="IDA Bridge URL override")

@@ -1,5 +1,5 @@
 """
-Antigravity IDA Bridge — Schema Loader
+ph4ntom IDA Bridge — Schema Loader
 ========================================
 Loads and caches api_schema.json, generates system prompts for AI backends.
 
@@ -23,7 +23,7 @@ class SchemaLoader:
             base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             candidates = (
                 os.path.join(base, "api_schema.json"),
-                os.path.join(sys.prefix, "share", "antigravity-ida-bridge", "api_schema.json"),
+                os.path.join(sys.prefix, "share", "ph4ntom-ida-bridge", "api_schema.json"),
             )
             schema_path = next((path for path in candidates if os.path.isfile(path)), candidates[0])
 
@@ -67,7 +67,7 @@ class SchemaLoader:
         if not self.schema:
             return (
                 "You are an expert reverse engineering AI agent connected to IDA Pro "
-                "via the Antigravity Bridge API. Use the available tools to analyze binaries."
+                "via the ph4ntom Bridge API. Use the available tools to analyze binaries."
             )
 
         parts = []

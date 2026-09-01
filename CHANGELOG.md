@@ -1,5 +1,20 @@
 # Changelog
 
+## 6.1.0
+
+### Changed
+
+- Renamed the project, Python distribution, CLI command, server identity, token
+  file, and IDA plugin to **ph4ntom IDA Bridge**.
+- Renamed the canonical GitHub repository to `ph4ntom-ida-bridge`.
+
+### Fixed
+
+- Added IDA 9.3 compatibility for segments, local types, structures, enums,
+  byte search, stack variables, debugger memory, and call stacks.
+- Made `/api/schema` work when IDA executes the plugin without defining
+  `__file__`.
+
 ## 6.0.0
 
 ### Fixed

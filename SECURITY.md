@@ -1,12 +1,12 @@
 # Security
 
-Antigravity IDA Bridge runs code inside the IDA Pro process. Treat access to the
+ph4ntom IDA Bridge runs code inside the IDA Pro process. Treat access to the
 bridge as equivalent to local code execution under the IDA user's account.
 
 ## Secure defaults
 
 - The server binds to `127.0.0.1`.
-- A 256-bit session token is stored in `~/.antigravity_token` with owner-only
+- A 256-bit session token is stored in `~/.ph4ntom_ida_bridge_token` with owner-only
   permissions where the operating system supports them.
 - Dynamic IDAPython execution is disabled unless `IDA_BRIDGE_ALLOW_EXEC=1` is
   present before IDA starts.
