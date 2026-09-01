@@ -400,7 +400,7 @@ def get_segments():
                 "end_ea": hex(s.end_ea),
                 "name": ida_segment.get_segm_name(s),
                 "size": s.size(),
-                "perm": f"{'r' if s.perm & ida_segment.SFL_READ else '-'}{'w' if s.perm & ida_segment.SFL_WRITE else '-'}{'x' if s.perm & ida_segment.SFL_EXEC else '-'}",
+                "perm": f"{'r' if s.perm & ida_segment.SEGPERM_READ else '-'}{'w' if s.perm & ida_segment.SEGPERM_WRITE else '-'}{'x' if s.perm & ida_segment.SEGPERM_EXEC else '-'}",
             })
         return {"segments": segs, "count": len(segs)}
     return safe_read(_inner)
@@ -409,41 +409,48 @@ def get_structs():
     """Get all defined structures."""
     def _inner():
         structs = []
-        idx = idc.get_first_struc_idx()
-        while idx != idc.BADADDR:
-            sid = idc.get_struc_by_idx(idx)
-            name = idc.get_struc_name(sid)
-            size = idc.get_struc_size(sid)
-            structs.append({"id": sid, "name": name, "size": size})
-            idx = idc.get_next_struc_idx(idx)
+        til = ida_typeinf.get_idati()
+        for ordinal in range(1, ida_typeinf.get_ordinal_limit(til)):
+            tif = ida_typeinf.tinfo_t()
+            if not tif.get_numbered_type(til, ordinal):
+                continue
+            if tif.is_struct() or tif.is_union():
+                structs.append({
+                    "id": ordinal,
+                    "name": ida_typeinf.get_numbered_type_name(til, ordinal),
+                    "size": tif.get_size(),
+                    "is_union": tif.is_union(),
+                })
         return {"structs": structs, "count": len(structs)}
     return safe_read(_inner)
 
 def get_struct_details(name_or_id):
     """Get struct members with offsets and types."""
     def _inner():
-        import ida_struct
+        til = ida_typeinf.get_idati()
+        tif = ida_typeinf.tinfo_t()
         if isinstance(name_or_id, str):
-            sid = idc.get_struc_id(name_or_id)
+            sid = ida_typeinf.get_type_ordinal(til, name_or_id)
+            found = tif.get_named_type(til, name_or_id)
         else:
             sid = name_or_id
-        if sid == idc.BADADDR:
+            found = tif.get_numbered_type(til, sid)
+        if not found or not (tif.is_struct() or tif.is_union()):
             return {"error": f"Structure not found: {name_or_id}"}
-        sname = idc.get_struc_name(sid)
-        ssize = idc.get_struc_size(sid)
-        sptr = ida_struct.get_struc(sid)
+        sname = tif.get_type_name() or str(name_or_id)
+        ssize = tif.get_size()
         members = []
-        if sptr:
-            for i in range(sptr.memqty):
-                m = sptr.get_member(i)
-                mname = ida_struct.get_member_name(m.id)
-                moff = m.soff
-                msize = ida_struct.get_member_size(m)
-                tinfo = ida_typeinf.tinfo_t()
-                mtype = "unknown"
-                if ida_struct.get_member_tinfo(tinfo, m):
-                    mtype = str(tinfo)
-                members.append({"name": mname, "offset": hex(moff), "offset_dec": moff, "size": msize, "type": mtype})
+        udt = ida_typeinf.udt_type_data_t()
+        if tif.get_udt_details(udt):
+            for member in udt:
+                moff = member.offset // 8
+                members.append({
+                    "name": member.name,
+                    "offset": hex(moff),
+                    "offset_dec": moff,
+                    "size": member.size // 8,
+                    "type": str(member.type),
+                })
         return {"name": sname, "id": sid, "size": ssize, "members": members, "count": len(members)}
     return safe_read(_inner)
 
@@ -451,29 +458,45 @@ def get_enums():
     """Get all enums."""
     def _inner():
         enums = []
-        for i in range(idc.get_enum_qty()):
-            eid = idc.getn_enum(i)
-            enums.append({"id": eid, "name": idc.get_enum_name(eid), "width": idc.get_enum_width(eid), "count": idc.get_enum_size(eid)})
+        til = ida_typeinf.get_idati()
+        for ordinal in range(1, ida_typeinf.get_ordinal_limit(til)):
+            tif = ida_typeinf.tinfo_t()
+            if not tif.get_numbered_type(til, ordinal) or not tif.is_enum():
+                continue
+            details = ida_typeinf.enum_type_data_t()
+            count = len(details) if tif.get_enum_details(details) else 0
+            enums.append({
+                "id": ordinal,
+                "name": ida_typeinf.get_numbered_type_name(til, ordinal),
+                "width": tif.get_size(),
+                "count": count,
+            })
         return {"enums": enums, "count": len(enums)}
     return safe_read(_inner)
 
 def get_enum_details(name_or_id):
     """Get enum members with values."""
     def _inner():
+        til = ida_typeinf.get_idati()
+        tif = ida_typeinf.tinfo_t()
         if isinstance(name_or_id, str):
-            eid = idc.get_enum(name_or_id)
+            eid = ida_typeinf.get_type_ordinal(til, name_or_id)
+            found = tif.get_named_type(til, name_or_id)
         else:
             eid = name_or_id
-        if eid == idc.BADADDR:
+            found = tif.get_numbered_type(til, eid)
+        if not found or not tif.is_enum():
             return {"error": f"Enum not found: {name_or_id}"}
-        ename = idc.get_enum_name(eid)
+        ename = tif.get_type_name() or str(name_or_id)
         members = []
-        val = idc.get_first_enum_member(eid)
-        while val != idc.BADADDR:
-            mid = idc.get_enum_member(eid, val, 0, 0)
-            mname = idc.get_enum_member_name(mid) if mid != idc.BADADDR else f"val_{val}"
-            members.append({"name": mname, "value": val, "value_hex": hex(val)})
-            val = idc.get_next_enum_member(eid, val)
+        details = ida_typeinf.enum_type_data_t()
+        if tif.get_enum_details(details):
+            for member in details:
+                members.append({
+                    "name": member.name,
+                    "value": member.value,
+                    "value_hex": hex(member.value),
+                })
         return {"name": ename, "id": eid, "members": members, "count": len(members)}
     return safe_read(_inner)
 
@@ -492,7 +515,6 @@ def search_bytes(pattern, start_ea=None, max_results=50):
     """Search for byte pattern. Pattern format: 'E8 ?? ?? ?? ?? 48 8B' where ?? = wildcard."""
     def _inner():
         import ida_ida
-        import ida_search
         s_ea = start_ea if start_ea else (ida_ida.inf_get_min_ea() if hasattr(ida_ida, 'inf_get_min_ea') else 0)
         max_ea = ida_ida.inf_get_max_ea() if hasattr(ida_ida, 'inf_get_max_ea') else 0xFFFFFFFF
         results = []
@@ -500,7 +522,19 @@ def search_bytes(pattern, start_ea=None, max_results=50):
         ida_pattern = pattern.replace('??', '?').replace('  ', ' ')
         current = s_ea
         for _ in range(max_results):
-            found = ida_search.find_binary(current, max_ea, ida_pattern, 16, ida_search.SEARCH_DOWN)
+            if hasattr(ida_bytes, 'find_bytes'):
+                found = ida_bytes.find_bytes(
+                    ida_pattern,
+                    current,
+                    range_end=max_ea,
+                    flags=ida_bytes.BIN_SEARCH_FORWARD | ida_bytes.BIN_SEARCH_NOSHOW,
+                    radix=16,
+                )
+            else:
+                import ida_search
+                found = ida_search.find_binary(
+                    current, max_ea, ida_pattern, 16, ida_search.SEARCH_DOWN
+                )
             if found == idc.BADADDR:
                 break
             func = ida_funcs.get_func(found)
@@ -968,17 +1002,21 @@ def get_stack_vars(ea):
         f = ida_funcs.get_func(ea)
         if not f:
             return {"error": f"No function at {hex(ea)}"}
-        import ida_frame, ida_struct
-        frame = ida_frame.get_frame(ea)
-        if not frame:
+        frame = ida_typeinf.tinfo_t()
+        if not frame.get_func_frame(f):
             return {"ea": hex(ea), "stack_vars": [], "count": 0}
         svars = []
-        for i in range(frame.memqty):
-            m = frame.get_member(i)
-            mname = ida_struct.get_member_name(m.id)
-            moff = m.soff
-            msize = ida_struct.get_member_size(m)
-            svars.append({"name": mname, "offset": hex(moff), "offset_dec": moff, "size": msize})
+        details = ida_typeinf.udt_type_data_t()
+        if frame.get_udt_details(details):
+            for member in details:
+                moff = member.offset // 8
+                svars.append({
+                    "name": member.name,
+                    "offset": hex(moff),
+                    "offset_dec": moff,
+                    "size": member.size // 8,
+                    "type": str(member.type),
+                })
         return {"ea": hex(ea), "name": ida_funcs.get_func_name(ea), "stack_vars": svars, "count": len(svars)}
     return safe_read(_inner)
 
@@ -1352,7 +1390,7 @@ def get_local_types():
     def _inner():
         til = ida_typeinf.get_idati()
         types = []
-        for ordinal in range(1, ida_typeinf.get_ordinal_qty(til) + 1):
+        for ordinal in range(1, ida_typeinf.get_ordinal_limit(til)):
             name = ida_typeinf.get_numbered_type_name(til, ordinal)
             if name:
                 tif = ida_typeinf.tinfo_t()
@@ -1398,10 +1436,10 @@ def get_type_libraries():
     def _inner():
         tils = []
         til = ida_typeinf.get_idati()
-        tils.append({"name":"local","desc":"Local type library","ntypes":ida_typeinf.get_ordinal_qty(til)})
+        tils.append({"name":"local","desc":"Local type library","ntypes":ida_typeinf.get_ordinal_count(til)})
         for i in range(ida_typeinf.get_idati().nbases):
             base = ida_typeinf.get_idati().base(i)
-            tils.append({"name":base.name,"desc":base.desc,"ntypes":ida_typeinf.get_ordinal_qty(base)})
+            tils.append({"name":base.name,"desc":base.desc,"ntypes":ida_typeinf.get_ordinal_count(base)})
         return {"libraries":tils,"count":len(tils)}
     return safe_read(_inner)
 
@@ -1435,9 +1473,9 @@ def set_segment_attrs_api(ea, attrs):
         if "class" in attrs: ida_segment.set_segm_class(seg, attrs["class"])
         if "perm" in attrs:
             p = attrs["perm"]; seg.perm = 0
-            if 'r' in p: seg.perm |= ida_segment.SFL_READ
-            if 'w' in p: seg.perm |= ida_segment.SFL_WRITE
-            if 'x' in p: seg.perm |= ida_segment.SFL_EXEC
+            if 'r' in p: seg.perm |= ida_segment.SEGPERM_READ
+            if 'w' in p: seg.perm |= ida_segment.SEGPERM_WRITE
+            if 'x' in p: seg.perm |= ida_segment.SEGPERM_EXEC
             seg.update()
         return {"success":True,"ea":hex(ea)}
     return safe_write(_inner)
@@ -1595,17 +1633,21 @@ def dbg_get_regs():
 
 def dbg_read_mem(ea, size):
     def _inner():
-        import ida_dbg
-        data = ida_dbg.dbg_read_memory(ea, size)
+        import ida_dbg, ida_idd
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        data = ida_idd.dbg_read_memory(ea, size)
         if not data: return {"error":f"Cannot read {size} bytes at {hex(ea)}"}
         return {"ea":hex(ea),"size":size,"hex":' '.join(f'{b:02X}' for b in data)}
     return safe_read(_inner)
 
 def dbg_write_mem(ea, hex_bytes):
     def _inner():
-        import ida_dbg
+        import ida_dbg, ida_idd
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
         data = bytes.fromhex(hex_bytes.replace(' ',''))
-        ok = ida_dbg.dbg_write_memory(ea, data)
+        ok = ida_idd.dbg_write_memory(ea, data)
         return {"success":ok>0,"ea":hex(ea),"size":len(data)}
     return safe_write(_inner)
 
@@ -1622,9 +1664,11 @@ def dbg_get_threads():
 
 def dbg_get_stack():
     def _inner():
-        import ida_dbg
-        trace = ida_dbg.call_stack_t()
-        ok = ida_dbg.get_call_stack(trace)
+        import ida_dbg, ida_idd
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        trace = ida_idd.call_stack_t()
+        ok = ida_dbg.collect_stack_trace(ida_dbg.get_current_thread(), trace)
         if not ok: return {"error":"Cannot get call stack"}
         frames = []
         for i in range(len(trace)):
