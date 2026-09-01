@@ -127,6 +127,37 @@ def test_http_security_defaults(monkeypatch, tmp_path):
     assert oversized.status_code == 413
 
 
+def test_schema_route_works_when_ida_executes_plugin_without_file(monkeypatch, tmp_path):
+    plugin, _ = _load_plugin(monkeypatch, tmp_path)
+    schema = ROOT / "api_schema.json"
+    installed_schema = tmp_path / schema.name
+    installed_schema.write_bytes(schema.read_bytes())
+
+    ida_diskio = types.ModuleType("ida_diskio")
+    ida_diskio.idadir = lambda subdir: str(tmp_path) if subdir == "plugins" else ""
+    ida_diskio.get_user_idadir = lambda: str(tmp_path / "user")
+    monkeypatch.setitem(sys.modules, "ida_diskio", ida_diskio)
+    monkeypatch.delattr(plugin, "__file__")
+
+    server = plugin.BridgeHTTPServer(("127.0.0.1", 0), plugin.BridgeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = requests.get(
+            base_url + "/api/schema",
+            headers={"Authorization": "Bearer " + plugin.AUTH_TOKEN},
+            timeout=2,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["version"] == plugin.BRIDGE_VERSION
+
+
 def test_every_documented_endpoint_is_routable(monkeypatch, tmp_path):
     plugin, _ = _load_plugin(monkeypatch, tmp_path)
     schema = json.loads((ROOT / "api_schema.json").read_text(encoding="utf-8"))

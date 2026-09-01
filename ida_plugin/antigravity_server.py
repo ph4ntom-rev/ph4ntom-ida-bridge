@@ -58,6 +58,34 @@ MAX_STRINGS = 2000
 MAX_BODY_SIZE = 5 * 1024 * 1024
 _cached_schema = None
 
+
+def _schema_candidates():
+    """Return schema locations for both plugin imports and IDA script execution."""
+    directories = []
+    script_path = globals().get('__file__')
+    if script_path:
+        script_dir = os.path.dirname(os.path.abspath(script_path))
+        directories.extend((script_dir, os.path.dirname(script_dir)))
+
+    try:
+        import ida_diskio
+        directories.extend((
+            ida_diskio.idadir('plugins'),
+            os.path.join(ida_diskio.get_user_idadir(), 'plugins'),
+        ))
+    except (ImportError, AttributeError, TypeError):
+        pass
+
+    directories.append(os.getcwd())
+    seen = set()
+    for directory in directories:
+        if not directory:
+            continue
+        candidate = os.path.realpath(os.path.join(directory, 'api_schema.json'))
+        if candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
 # ─── Authentication ──────────────────────────────────────────────────────────
 
 def _env_flag(name, default=False):
@@ -2053,12 +2081,8 @@ def route_do_get_39(self, match, params):
     try:
         global _cached_schema
         if _cached_schema is None:
-            schema_candidates = (
-                os.path.join(os.path.dirname(__file__), 'api_schema.json'),
-                os.path.join(os.path.dirname(__file__), '..', 'api_schema.json'),
-            )
             schema_path = next(
-                (os.path.realpath(path) for path in schema_candidates if os.path.isfile(path)),
+                (path for path in _schema_candidates() if os.path.isfile(path)),
                 None,
             )
             if schema_path is None:
