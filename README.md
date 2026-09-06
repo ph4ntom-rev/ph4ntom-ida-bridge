@@ -192,7 +192,7 @@ Key endpoint groups include:
 - binary metadata, functions, instructions, strings, imports, and exports;
 - pseudocode, ctree, microcode, local variables, callers, and callees;
 - cross-references, control-flow graphs, types, structures, and enums;
-- database mutations with batch rollback support;
+- database mutations with preview and verified name/comment compensation (see [batch safety and migration](BATCH_SAFETY.md));
 - debugger control, registers, threads, stack, and memory;
 - cursor events over server-sent events.
 

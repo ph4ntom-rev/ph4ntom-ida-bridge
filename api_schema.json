@@ -115,7 +115,7 @@
       {"method":"POST","path":"/api/undo","desc":"Undo last action","body":{}},
       {"method":"POST","path":"/api/redo","desc":"Redo action","body":{}},
       {"method":"POST","path":"/api/navigate","desc":"Move cursor to address","body":{"ea":"0x..."}},
-      {"method":"POST","path":"/api/batch","desc":"Execute batch mutations atomically with rollback. Ops: rename-func, comment-func, comment, rename-var, create-struct, set-type","body":{"mutations":[{"op":"rename-func","ea":"0x...","name":"new_name"}]}},
+      {"method":"POST","path":"/api/batch","desc":"Prevalidate 1-256 mutations. dry_run previews without writes. Default rollback mode restores name/comment values on failure; inspect rollback results. rename-var, create-struct and set-type require best_effort mode without rollback","body":{"dry_run":false,"mode":"rollback","mutations":[{"op":"rename-func","ea":"0x...","name":"new_name"}]}},
       {"method":"POST","path":"/api/exec","desc":"Execute IDAPython with full SDK access when IDA_BRIDGE_ALLOW_EXEC=1. Use result dict to return data. Print statements are captured.","body":{"script":"import ida_funcs\\nresult['count'] = ida_funcs.get_func_qty()"}},
       {"method":"POST","path":"/api/dbg/start","desc":"Start process (debugger)","body":{"path":"optional","args":"","sdir":"optional"}},
       {"method":"POST","path":"/api/dbg/attach","desc":"Attach to process","body":{"pid":1234}},
@@ -190,7 +190,7 @@
   ],
   "tips": [
     "Prefer dedicated endpoints; /api/exec requires IDA_BRIDGE_ALLOW_EXEC=1 and grants full IDAPython access",
-    "Use /api/batch for bulk operations — it's atomic and supports rollback",
+    "Preview /api/batch with dry_run=true; rollback compensates names/comments only and is not a database transaction",
     "Always check /api/info first to know if Hex-Rays (decompiler) is available",
     "Use /api/function/<ea>/ctree for pattern matching instead of parsing pseudocode text",
     "Microcode maturity 0 shows raw translation, 7 shows fully optimized — useful for deobfuscation",

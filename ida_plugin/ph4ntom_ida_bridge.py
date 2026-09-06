@@ -152,33 +152,45 @@ ALLOWED_IMPORT_ROOTS = tuple(
 
 # ─── Thread-Safe Execution ───────────────────────────────────────────────────
 
-def safe_read(func):
-    """Execute function in IDA's main thread (read mode)."""
-    result = [None]
-    error = [None]
+_sync_context = threading.local()
+
+
+def _run_synced(func, write):
+    active = getattr(_sync_context, "write", None)
+    if active is not None:
+        if write and not active:
+            raise RuntimeError("Cannot write inside a read callback")
+        return func()
+    result, error, completed = [None], [None], [False]
+
     def wrapper():
+        _sync_context.write = write
         try:
             result[0] = func()
         except Exception:
             error[0] = traceback.format_exc()
-    ida_kernwin.execute_sync(wrapper, ida_kernwin.MFF_READ)
+        finally:
+            del _sync_context.write
+            completed[0] = True
+        return 0  # execute_sync callbacks must return an integer.
+
+    status = ida_kernwin.execute_sync(wrapper, ida_kernwin.MFF_WRITE if write else ida_kernwin.MFF_READ)
+    if status == -1 or not completed[0]:
+        raise RuntimeError("IDA rejected main-thread execution")
     if error[0]:
         raise RuntimeError(error[0])
     return result[0]
 
+
+def safe_read(func):
+    """Execute in IDA's main thread; reuse an enclosing bridge callback."""
+    return _run_synced(func, False)
+
+
 def safe_write(func):
-    """Execute function in IDA's main thread (write mode)."""
-    result = [None]
-    error = [None]
-    def wrapper():
-        try:
-            result[0] = func()
-        except Exception:
-            error[0] = traceback.format_exc()
-    ida_kernwin.execute_sync(wrapper, ida_kernwin.MFF_WRITE)
-    if error[0]:
-        raise RuntimeError(error[0])
-    return result[0]
+    """Execute in IDA's main thread with write permission."""
+    return _run_synced(func, True)
+
 
 def _xref_type_str(t):
     """Convert xref type to string (IDA 9.x compat)."""
@@ -728,15 +740,17 @@ def rename_function(ea, new_name):
 def set_function_comment(ea, comment, repeatable=True):
     """Set comment on function."""
     def _inner():
-        idc.set_func_cmt(ea, comment, repeatable)
-        return {"success": True, "ea": hex(ea), "comment": comment}
+        ok = idc.set_func_cmt(ea, comment, repeatable)
+        ok = bool(ok) and (idc.get_func_cmt(ea, repeatable) or "") == comment
+        return {"success": ok, "ea": hex(ea), "comment": comment}
     return safe_write(_inner)
 
 def set_address_comment(ea, comment, repeatable=False):
     """Set inline comment at address."""
     def _inner():
-        idc.set_cmt(ea, comment, repeatable)
-        return {"success": True, "ea": hex(ea), "comment": comment}
+        ok = idc.set_cmt(ea, comment, repeatable)
+        ok = bool(ok) and (idc.get_cmt(ea, repeatable) or "") == comment
+        return {"success": ok, "ea": hex(ea), "comment": comment}
     return safe_write(_inner)
 
 def rename_local_var(func_ea, old_name, new_name):
@@ -771,9 +785,9 @@ def create_struct(c_definition):
             count = idc.parse_decls(c_definition, idc.PT_TYP)
         except Exception as e:
             return {"error": f"Parse error: {str(e)}", "input": c_definition}
-        if count == 0:
-            return {"error": "Failed to parse structure definition (0 types parsed)", "input": c_definition}
-        return {"success": True, "types_parsed": count, "definition": c_definition}
+        if count != 0:
+            return {"success": False, "error": "C declaration parsing failed", "parse_errors": count}
+        return {"success": True, "parse_errors": 0, "definition": c_definition}
     return safe_write(_inner)
 
 def set_func_type(ea, type_str):
@@ -787,73 +801,153 @@ def set_func_type(ea, type_str):
         return {"error": f"Failed to set type '{type_str}' at {hex(ea)}", "ea": hex(ea)}
     return safe_write(_inner)
 
-def execute_batch(mutations):
-    """Execute a batch of mutations atomically (best-effort rollback on error)."""
-    results = []
-    rollback_actions = []
+_BATCH_FIELDS = {
+    "rename-func": ("name",), "comment-func": ("comment",), "comment": ("comment",),
+    "rename-var": ("old", "new"), "create-struct": ("definition",), "set-type": ("type",),
+}
+_BATCH_REVERSIBLE = {"rename-func", "comment-func", "comment"}
 
-    for i, mut in enumerate(mutations):
-        op = mut.get("op")
-        try:
-            if op == "rename-func":
-                ea = int(mut["ea"], 16)
-                old_name = safe_read(lambda: ida_funcs.get_func_name(ea))
-                result = rename_function(ea, mut["name"])
-                if result.get("success"):
-                    rollback_actions.append(("rename-func", ea, old_name))
-            elif op == "comment-func":
-                ea = int(mut["ea"], 16)
-                result = set_function_comment(ea, mut["comment"])
-            elif op == "comment":
-                ea = int(mut["ea"], 16)
-                result = set_address_comment(ea, mut["comment"])
-            elif op == "rename-var":
-                ea = int(mut["ea"], 16)
-                result = rename_local_var(ea, mut["old"], mut["new"])
-                if result.get("success"):
-                    rollback_actions.append(("rename-var", ea, mut["new"], mut["old"]))
-            elif op == "create-struct":
-                result = create_struct(mut["definition"])
-            elif op == "set-type":
-                ea = int(mut["ea"], 16)
-                result = set_func_type(ea, mut["type"])
-            else:
-                result = {"error": f"Unknown operation: {op}"}
 
-            if result.get("error"):
-                # Attempt rollback
-                _do_rollback(rollback_actions)
-                return {
-                    "status": "error",
-                    "failed_at": i,
-                    "operation": mut,
-                    "error": result["error"],
-                    "rolled_back": len(rollback_actions),
-                    "completed_before_error": results,
-                }
-            results.append(result)
-        except Exception as e:
-            _do_rollback(rollback_actions)
-            return {
-                "status": "error",
-                "failed_at": i,
-                "operation": mut,
-                "error": str(e),
-                "rolled_back": len(rollback_actions),
-            }
+def execute_batch(mutations, dry_run=False, mode="rollback"):
+    """Prevalidate a bounded batch, then compensate supported values on failure.
 
-    return {"status": "ok", "results": results, "count": len(results)}
+    This is not an IDB transaction: analysis side effects and a process crash cannot
+    be undone. Types and decompiler locals require explicit best_effort mode.
+    """
+    if type(dry_run) is not bool or mode not in ("rollback", "best_effort"):
+        return {"status": "error", "success": False, "phase": "validation", "error": "Invalid dry_run or mode"}
+    if not isinstance(mutations, list) or not 1 <= len(mutations) <= 256:
+        return {"status": "error", "success": False, "phase": "validation", "error": "Provide 1 to 256 mutations"}
+
+    def _inner():
+        prepared = []
+        planned_names = set()
+        for i, mut in enumerate(mutations):
+            try:
+                if not isinstance(mut, dict) or not isinstance(mut.get("op"), str):
+                    raise ValueError("Each mutation requires a string op")
+                op = mut["op"]
+                if op not in _BATCH_FIELDS:
+                    raise ValueError("Unknown operation: " + op)
+                if mode == "rollback" and op not in _BATCH_REVERSIBLE:
+                    raise ValueError(op + " requires mode=best_effort; rollback is not supported")
+                allowed = {"op", *_BATCH_FIELDS[op]}
+                if op != "create-struct":
+                    allowed.add("ea")
+                if op in ("comment", "comment-func"):
+                    allowed.add("repeatable")
+                if set(mut) - allowed:
+                    raise ValueError("Unexpected mutation fields")
+                for field in _BATCH_FIELDS[op]:
+                    value = mut.get(field)
+                    if not isinstance(value, str) or len(value) > 65536 or "\x00" in value:
+                        raise ValueError("Invalid string field: " + field)
+                    if field != "comment" and not value:
+                        raise ValueError("Empty field: " + field)
+                item = dict(mut)
+                if op != "create-struct":
+                    ea_text = mut.get("ea")
+                    if not isinstance(ea_text, str) or not re.fullmatch(r"(?:0[xX])?[0-9a-fA-F]{1,16}", ea_text):
+                        raise ValueError("ea must be a hexadecimal address string")
+                    ea = int(ea_text, 16)
+                    if ea == ida_idaapi.BADADDR or not ida_bytes.is_mapped(ea):
+                        raise ValueError("Address is not mapped")
+                    item["ea"] = ea
+                    if op in ("rename-func", "comment-func", "rename-var", "set-type"):
+                        function = ida_funcs.get_func(ea)
+                        if not function or function.start_ea != ea:
+                            raise ValueError("Address must be a function start")
+                if op in ("comment", "comment-func"):
+                    item["repeatable"] = mut.get("repeatable", op == "comment-func")
+                    if type(item["repeatable"]) is not bool:
+                        raise ValueError("repeatable must be boolean")
+                if op == "rename-func":
+                    name = item["name"]
+                    if ida_name.validate_name(name, ida_name.VNT_IDENT) != name:
+                        raise ValueError("Invalid IDA name")
+                    owner = ida_name.get_name_ea(ida_idaapi.BADADDR, name)
+                    if owner not in (ida_idaapi.BADADDR, item["ea"]) or name in planned_names:
+                        raise ValueError("Name already exists or is repeated in the batch")
+                    planned_names.add(name)
+                if op == "rename-var" and not HAS_HEXRAYS:
+                    raise ValueError("Hex-Rays is not available")
+                prepared.append(item)
+            except Exception as exc:
+                return {"status": "error", "success": False, "phase": "validation", "failed_at": i,
+                        "error": str(exc), "applied": 0, "rollback_attempted": False}
+
+        if dry_run:
+            return {"status": "preview", "success": True, "mode": mode, "count": len(prepared), "applied": 0,
+                    "plan": [dict(item, ea=hex(item["ea"])) if "ea" in item else item for item in prepared],
+                    "limitations": "Preview checks shape, addresses and names; it does not parse types or modify IDB. Execution revalidates."}
+
+        results, undo = [], []
+        for i, item in enumerate(prepared):
+            op, ea = item["op"], item.get("ea")
+            try:
+                # Capture immediately before each call, including a call that might
+                # mutate and then raise. Reverse order restores repeated writes.
+                if mode == "rollback":
+                    undo.append((i, item, _batch_read_value(item)))
+                if op == "rename-func":
+                    result = {"success": bool(ida_name.set_name(ea, item["name"], ida_name.SN_NOWARN))}
+                    result["success"] = result["success"] and ida_name.get_name(ea) == item["name"]
+                elif op == "comment-func":
+                    result = set_function_comment(ea, item["comment"], item["repeatable"])
+                elif op == "comment":
+                    result = set_address_comment(ea, item["comment"], item["repeatable"])
+                elif op == "rename-var":
+                    result = rename_local_var(ea, item["old"], item["new"])
+                elif op == "create-struct":
+                    result = create_struct(item["definition"])
+                else:
+                    result = set_func_type(ea, item["type"])
+                if not isinstance(result, dict) or result.get("error") or result.get("success") is not True:
+                    raise RuntimeError(result.get("error", "IDA rejected operation") if isinstance(result, dict) else "Invalid operation result")
+                results.append(result)
+            except Exception as exc:
+                rollback = _do_rollback(undo) if mode == "rollback" else []
+                return {"status": "error", "success": False, "phase": "execution", "mode": mode,
+                        "failed_at": i, "error": str(exc), "completed_before_error": results,
+                        "rollback_attempted": bool(undo), "rollback": rollback,
+                        "rolled_back": sum(entry["success"] for entry in rollback),
+                        "rollback_complete": all(entry["success"] for entry in rollback) if undo else False,
+                        "state": "restored_values" if undo and all(entry["success"] for entry in rollback) else "inspect_required"}
+        return {"status": "ok", "success": True, "mode": mode, "results": results, "count": len(results)}
+
+    return (safe_read if dry_run else safe_write)(_inner)
+
+
+def _batch_read_value(item):
+    ea, op = item["ea"], item["op"]
+    if op == "rename-func":
+        return ida_name.get_name(ea)
+    getter = idc.get_func_cmt if op == "comment-func" else idc.get_cmt
+    return getter(ea, item["repeatable"]) or ""
+
 
 def _do_rollback(actions):
-    """Best-effort rollback of completed mutations."""
-    for action in reversed(actions):
+    """Return an independently verified result for every attempted restoration."""
+    results = []
+    for index, item, value in reversed(actions):
+        entry = {"index": index, "op": item["op"], "success": False}
         try:
-            if action[0] == "rename-func":
-                rename_function(action[1], action[2])
-            elif action[0] == "rename-var":
-                rename_local_var(action[1], action[2], action[3])
+            if _batch_read_value(item) == value:
+                entry.update(success=True, changed=False)
+            else:
+                if item["op"] == "rename-func":
+                    ok = ida_name.set_name(item["ea"], value, ida_name.SN_NOWARN)
+                else:
+                    setter = idc.set_func_cmt if item["op"] == "comment-func" else idc.set_cmt
+                    ok = setter(item["ea"], value, item["repeatable"])
+                entry.update(success=bool(ok) and _batch_read_value(item) == value, changed=True)
+                if not entry["success"]:
+                    entry["error"] = "IDA rejected restoration or readback differed"
         except Exception as exc:
-            ida_kernwin.msg("[ph4ntom] Rollback action failed: " + str(exc) + "\n")
+            entry["error"] = str(exc)
+        results.append(entry)
+    return results
+
 
 # ─── Extended Sensor Functions ───────────────────────────────────────────────
 
@@ -1216,10 +1310,8 @@ def import_c_header(filepath):
         if not os.path.exists(abs_path) or not os.path.isfile(abs_path):
             return {"success": False, "error": f"File not found: {filepath}"}
 
-        with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-        errors = idc.parse_decls(content, idc.PT_FILE | idc.PT_TYP)
-        return {"success": errors > 0, "types_parsed": errors, "file": abs_path}
+        errors = idc.parse_decls(abs_path, idc.PT_FILE | idc.PT_TYP)
+        return {"success": errors == 0, "parse_errors": errors, "file": abs_path}
     return safe_write(_inner)
 
 def reanalyze_range(start_ea, end_ea):
@@ -1420,7 +1512,7 @@ def get_type_by_name(name):
 def create_type_from_c(c_decl):
     def _inner():
         count = idc.parse_decls(c_decl, idc.PT_TYP)
-        return {"success":count>0,"types_parsed":count,"definition":c_decl}
+        return {"success": count == 0, "parse_errors": count, "definition": c_decl}
     return safe_write(_inner)
 
 def delete_local_type(name):
@@ -2144,7 +2236,7 @@ def route_do_post_0(self, match, data):
     if not mutations:
         self.send_error_json('No mutations provided')
         return
-    self.send_json(execute_batch(mutations))
+    self.send_json(execute_batch(mutations, dry_run=data.get("dry_run", False), mode=data.get("mode", "rollback")))
 
 @post_route(r'/api/function/.*')
 def route_do_post_1(self, match, data):
