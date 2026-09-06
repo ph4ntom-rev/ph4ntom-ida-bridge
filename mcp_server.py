@@ -393,17 +393,19 @@ def patch_bytes(ea: str, hex_bytes: str) -> str:
     return json.dumps(_post("/api/patch-bytes", {"ea": ea, "bytes": hex_bytes}))
 
 @mcp.tool 
-def batch_mutations(mutations: str) -> str:
-    """Execute multiple mutations atomically with rollback support.
+def batch_mutations(mutations: str, dry_run: bool = False, mode: str = "rollback") -> str:
+    """Prevalidate a batch and compensate supported name/comment values on failure.
     Pass a JSON array string of operations.
     
     Args:
+        dry_run: Preview the validated plan without database writes.
+        mode: rollback for names/comments; best_effort for types/locals, without compensation.
         mutations: JSON array string, e.g. '[{"op":"rename-func","ea":"0x...","name":"new_name"}]'
     """
     ops = json.loads(mutations)
     if not isinstance(ops, list):
         raise ValueError("mutations must decode to a JSON array")
-    return json.dumps(_post("/api/batch", {"mutations": ops}), indent=2)
+    return json.dumps(_post("/api/batch", {"mutations": ops, "dry_run": dry_run, "mode": mode}), indent=2)
 
 # ─── Debugger Tools ──────────────────────────────────────────────────────────
 

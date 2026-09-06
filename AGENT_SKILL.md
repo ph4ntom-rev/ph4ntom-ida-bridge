@@ -12,7 +12,7 @@ session token from `~/.ph4ntom_ida_bridge_token`.
 3. Prefer a documented endpoint over dynamic IDAPython.
 4. Treat `/api/exec` as local code execution. It is unavailable unless the IDA
    process was started with `IDA_BRIDGE_ALLOW_EXEC=1`.
-5. Use `/api/batch` for related mutations so failures can be rolled back.
+5. Preview related mutations using `/api/batch` with `dry_run: true`. Default rollback mode compensates name/comment values; inspect `rollback_complete`. Type and local-variable operations require explicit `mode: "best_effort"` and can leave partial changes. Never describe a batch as a database transaction.
 6. Work on a copy of the database when testing destructive operations.
 
 ## Quick reference
