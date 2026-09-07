@@ -10,8 +10,8 @@ class TestBridgeClient:
         assert client.base_url == "http://127.0.0.1:13370"
 
     def test_init_custom_url(self):
-        client = BridgeClient(url="http://test:8080/")
-        assert client.base_url == "http://test:8080"
+        client = BridgeClient(url="http://localhost:8080/")
+        assert client.base_url == "http://localhost:8080"
 
     @pytest.mark.parametrize(
         "url",
@@ -37,7 +37,7 @@ class TestBridgeClient:
         response = client.get("/api/test")
 
         assert response == {"success": True, "data": "test"}
-        mock_request.assert_called_once_with('GET', 'http://127.0.0.1:13370/api/test', params={}, timeout=30)
+        mock_request.assert_called_once_with('GET', 'http://127.0.0.1:13370/api/test', params={}, timeout=30, allow_redirects=False)
 
     @patch('core.client.requests.Session.request')
     def test_post_success(self, mock_request):
@@ -51,7 +51,7 @@ class TestBridgeClient:
         response = client.post("/api/test", data={"key": "value"})
 
         assert response == {"success": True}
-        mock_request.assert_called_once_with('POST', 'http://127.0.0.1:13370/api/test', json={"key": "value"}, timeout=30)
+        mock_request.assert_called_once_with('POST', 'http://127.0.0.1:13370/api/test', json={"key": "value"}, timeout=30, allow_redirects=False)
 
     @patch('core.client.requests.Session.request')
     def test_request_connection_error(self, mock_request):
@@ -62,7 +62,7 @@ class TestBridgeClient:
         response = client.get("/api/test")
 
         assert response["success"] is False
-        assert "offline" in response["error"]
+        assert "Cannot communicate" in response["error"]
 
     @patch('core.client.requests.Session.request')
     def test_request_json_decode_error(self, mock_request):

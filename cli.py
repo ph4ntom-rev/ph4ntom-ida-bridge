@@ -6,12 +6,15 @@ from __future__ import annotations
 import argparse
 import filecmp
 import json
+import math
 import os
 import shutil
 # Only a validated IDA executable is launched, always without a shell.
 import subprocess  # nosec B404
 import sys
 import time
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -54,9 +57,9 @@ def find_ida(ida_dir: Optional[str] = None) -> str:
                 return str(candidate.resolve())
         return ""
 
-    candidate_dirs = []
     if ida_dir:
-        candidate_dirs.append(Path(ida_dir).expanduser())
+        return find_in_directory(Path(ida_dir).expanduser())
+    candidate_dirs = []
     if os.environ.get("IDA_DIR"):
         candidate_dirs.append(Path(os.environ["IDA_DIR"]).expanduser())
 
@@ -93,12 +96,12 @@ def _plugin_directory(ida_executable: str) -> Path:
 
 
 def install_plugin(ida_executable: str, force: bool = False) -> Dict[str, Any]:
-    """Install the canonical plugin and its schema beside each other."""
+    """Preflight, stage, back up, and replace the plugin/schema as one operation."""
     plugin_dir = _plugin_directory(ida_executable)
-    plugin_dir.mkdir(parents=True, exist_ok=True)
     installed = []
     unchanged = []
-
+    pending = []
+    backups = {}
     for source in (PLUGIN_SOURCE, SCHEMA_SOURCE):
         if not source.is_file():
             return {"error": f"Required project file is missing: {source}", "success": False}
@@ -109,20 +112,42 @@ def install_plugin(ida_executable: str, force: bool = False) -> Dict[str, Any]:
         if destination.exists() and not force:
             return {
                 "error": f"Plugin file already exists and differs: {destination}",
-                "hint": "Re-run with --force to create a .bak copy and replace it.",
+                "hint": "Re-run with --force to back up and replace both files.",
                 "success": False,
             }
-        if destination.exists():
-            backup = destination.with_suffix(destination.suffix + ".bak")
-            shutil.copy2(destination, backup)
-        shutil.copy2(source, destination)
-        installed.append(str(destination))
-
+        pending.append((source, destination))
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix='.ph4ntom-install-', dir=plugin_dir) as staging:
+            for source, destination in pending:
+                shutil.copy2(source, Path(staging) / source.name)
+                if destination.exists():
+                    backup = destination.with_suffix(destination.suffix + '.bak')
+                    if backup.exists():
+                        backup = destination.with_suffix(destination.suffix + '.' + uuid.uuid4().hex + '.bak')
+                    shutil.copy2(destination, backup)
+                    backups[str(destination)] = str(backup)
+            for source, destination in pending:
+                os.replace(Path(staging) / source.name, destination)
+                installed.append(str(destination))
+    except OSError as exc:
+        rollback_errors = []
+        for filename in reversed(installed):
+            try:
+                if filename in backups:
+                    shutil.copy2(backups[filename], filename)
+                else:
+                    Path(filename).unlink()
+            except OSError as rollback_error:
+                rollback_errors.append(str(rollback_error))
+        return {'success': False, 'error': str(exc), 'backups': backups,
+                'rollback_complete': not rollback_errors, 'rollback_errors': rollback_errors}
     return {
         "success": True,
         "plugin_directory": str(plugin_dir),
         "installed": installed,
         "unchanged": unchanged,
+        "backups": backups,
     }
 
 
@@ -161,11 +186,15 @@ def _read_script(code: Optional[str], filename: Optional[str]) -> str:
 
 
 def _wait_for_bridge(client: BridgeClient, timeout: float) -> Dict[str, Any]:
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError('wait timeout must be positive and finite')
     started = time.monotonic()
     while time.monotonic() - started < timeout:
-        if client.is_online():
+        remaining = timeout - (time.monotonic() - started)
+        response = client.ping(timeout=max(0.001, min(1, remaining)))
+        if response.get('status') == 'ok' and not response.get('error'):
             return {"success": True, "online": True, "waited": round(time.monotonic() - started, 1)}
-        time.sleep(1)
+        time.sleep(max(0, min(0.25, timeout - (time.monotonic() - started))))
     return {"error": f"Bridge did not become ready within {timeout:g} seconds", "success": False}
 
 
@@ -183,6 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("imports", help="List imported symbols")
     sub.add_parser("exports", help="List exported symbols")
     sub.add_parser("schema", help="Return the complete REST API schema")
+    sub.add_parser("doctor", help="Check runtime files and authenticated IDA connectivity")
 
     functions = sub.add_parser("functions", help="List functions")
     functions.add_argument("--limit", type=int, default=None)
@@ -227,6 +257,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _dispatch(client: BridgeClient, args: argparse.Namespace) -> Dict[str, Any]:
     command = args.command
+    if command == 'doctor':
+        ping = client.ping()
+        info = client.info() if ping.get('status') == 'ok' else {'error': 'Bridge offline'}
+        files = {'plugin': PLUGIN_SOURCE.is_file(), 'schema': SCHEMA_SOURCE.is_file()}
+        return {'success': all(files.values()) and not info.get('error') and info.get('success') is not False,
+                'python': sys.executable, 'runtime_files': files, 'bridge': ping, 'database': info}
     if command == "ping":
         return client.ping()
     if command == "info":
@@ -278,7 +314,11 @@ def _launch(args: argparse.Namespace, client: BridgeClient) -> Dict[str, Any]:
         command.append("-A")
     command.append(str(target))
     # Both executable and binary paths were resolved and validated above.
-    process = subprocess.Popen(command)  # nosec B603
+    environment = os.environ.copy()
+    if args.wait:
+        environment['IDA_BRIDGE_AUTOSTART'] = '1'
+    process = subprocess.Popen(command, env=environment,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if args.headless else 0)  # nosec B603
     result = {"success": True, "status": "launched", "pid": process.pid, "ida": ida_executable}
     if args.wait:
         result["bridge"] = _wait_for_bridge(client, args.wait_timeout)

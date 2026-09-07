@@ -19,6 +19,7 @@ import re
 import secrets
 import tempfile
 import os
+import socket
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -52,10 +53,13 @@ except ImportError:
 
 HOST = "127.0.0.1"
 PORT = 13370
-BRIDGE_VERSION = "6.1.0"
+BRIDGE_VERSION = "6.2.0"
 MAX_FUNCTIONS = 5000
 MAX_STRINGS = 2000
 MAX_BODY_SIZE = 5 * 1024 * 1024
+MAX_TRANSFER = 1024 * 1024
+REQUEST_TIMEOUT = 5
+MAX_CONNECTIONS = 16
 _cached_schema = None
 
 
@@ -101,10 +105,11 @@ def _write_secure_token(token):
     candidates = []
     if configured:
         candidates.append(os.path.abspath(os.path.expanduser(configured)))
-    candidates.extend([
+    if not configured:
+        candidates.extend([
         os.path.join(os.path.expanduser("~"), ".ph4ntom_ida_bridge_token"),
         os.path.join(tempfile.gettempdir(), ".ph4ntom_ida_bridge_token"),
-    ])
+        ])
 
     last_error = None
     for token_path in candidates:
@@ -114,15 +119,7 @@ def _write_secure_token(token):
             if token_dir:
                 os.makedirs(token_dir, mode=0o700, exist_ok=True)
             temp_path = token_path + "." + secrets.token_hex(8) + ".tmp"
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            fd = os.open(temp_path, flags, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as token_file:
-                token_file.write(token)
-                token_file.flush()
-                try:
-                    os.fsync(token_file.fileno())
-                except OSError:
-                    pass
+            _create_private_file(temp_path, token.encode('ascii'))
             os.replace(temp_path, token_path)
             try:
                 os.chmod(token_path, 0o600)
@@ -140,10 +137,61 @@ def _write_secure_token(token):
     raise RuntimeError("Unable to create a secure bridge token file: " + str(last_error))
 
 
+def _create_private_file(path, content):
+    """Protect the file before writing bytes, including a real Windows DACL."""
+    if os.name != 'nt':
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return
+    import ctypes
+    from ctypes import wintypes
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [('length', wintypes.DWORD), ('descriptor', ctypes.c_void_p), ('inherit', wintypes.BOOL)]
+    advapi = ctypes.WinDLL('advapi32', use_last_error=True)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p)
+    convert.restype = wintypes.BOOL
+    kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(SecurityAttributes), wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.WriteFile.argtypes = (wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p)
+    kernel.WriteFile.restype = wintypes.BOOL
+    kernel.FlushFileBuffers.argtypes = (wintypes.HANDLE,)
+    kernel.FlushFileBuffers.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel.LocalFree.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
+    if not convert('D:P(A;;FA;;;OW)', 1, ctypes.byref(descriptor), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+        handle = kernel.CreateFileW(path, 0x40000000, 0, ctypes.byref(attributes), 1, 0x80, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            written = wintypes.DWORD()
+            buffer = ctypes.create_string_buffer(content)
+            if not kernel.WriteFile(handle, buffer, len(content), ctypes.byref(written), None) or written.value != len(content):
+                raise OSError('Incomplete token write')
+            if not kernel.FlushFileBuffers(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel.CloseHandle(handle)
+    finally:
+        kernel.LocalFree(descriptor)
+
+
 AUTH_TOKEN = secrets.token_hex(32)
-_token_path = _write_secure_token(AUTH_TOKEN)
+_token_path = None  # Merely importing a plugin must not rotate a running server's token.
 AUTH_ENABLED = not _env_flag("IDA_BRIDGE_DISABLE_AUTH", False)
 ALLOW_SCRIPT_EXECUTION = _env_flag("IDA_BRIDGE_ALLOW_EXEC", False)
+READ_ONLY = _env_flag("IDA_BRIDGE_READ_ONLY", False)
 ALLOWED_IMPORT_ROOTS = tuple(
     os.path.realpath(os.path.expanduser(path.strip()))
     for path in os.environ.get("IDA_BRIDGE_ALLOWED_IMPORT_ROOTS", "").split(os.pathsep)
@@ -561,6 +609,7 @@ def search_bytes(pattern, start_ea=None, max_results=50):
 
 def read_bytes(ea, size):
     """Read raw bytes at address."""
+    size = bounded_int(size, 'size', 1, MAX_TRANSFER)
     def _inner():
         data = ida_bytes.get_bytes(ea, size)
         if data is None:
@@ -648,8 +697,8 @@ def save_database():
     """Save the IDA database."""
     def _inner():
         import ida_loader
-        ida_loader.save_database(ida_nalt.get_input_file_path() + ".idb", 0)
-        return {"success": True, "message": "Database saved"}
+        ok = bool(ida_loader.save_database(None, 0))
+        return {"success": ok, "message": "Database saved" if ok else "IDA refused to save the database"}
     return safe_write(_inner)
 
 def wait_for_analysis():
@@ -685,35 +734,49 @@ def delete_function(ea):
 
 def add_struct_member_api(struct_name, member_name, offset, size, type_str=None):
     """Add a member to an existing structure."""
+    size = bounded_int(size, 'size', 1, MAX_TRANSFER)
+    offset = bounded_int(offset, 'offset', -1, MAX_TRANSFER)
     def _inner():
-        import ida_struct
-        sid = idc.get_struc_id(struct_name)
-        if sid == idc.BADADDR:
+        tif = ida_typeinf.tinfo_t()
+        if not tif.get_named_type(ida_typeinf.get_idati(), struct_name) or not (tif.is_struct() or tif.is_union()):
             return {"error": f"Structure '{struct_name}' not found"}
-        sptr = ida_struct.get_struc(sid)
-        flag = ida_bytes.FF_BYTE
-        if size == 2: flag = ida_bytes.FF_WORD
-        elif size == 4: flag = ida_bytes.FF_DWORD
-        elif size == 8: flag = ida_bytes.FF_QWORD
-        err = ida_struct.add_struc_member(sptr, member_name, offset, flag, None, size)
-        if err != 0:
-            return {"error": f"Failed to add member (error code {err})", "struct": struct_name}
+        member_type = ida_typeinf.tinfo_t()
         if type_str:
-            m = ida_struct.get_member_by_name(sptr, member_name)
-            if m:
-                tinfo = ida_typeinf.tinfo_t()
-                if tinfo.get_named_type(None, type_str):
-                    ida_struct.set_member_tinfo(sptr, m, 0, tinfo, 0)
-        return {"success": True, "struct": struct_name, "member": member_name, "offset": hex(offset)}
+            ida_typeinf.parse_decl(member_type, None, type_str.rstrip(';') + ';', ida_typeinf.PT_TYP | ida_typeinf.PT_SIL)
+            if member_type.empty():
+                return {"error": f"Cannot parse member type: {type_str}"}
+            if member_type.get_size() != size:
+                return {"error": "Member type size does not match the requested size"}
+        else:
+            member_type = ida_typeinf.tinfo_t({1: ida_typeinf.BTF_UINT8, 2: ida_typeinf.BTF_UINT16,
+                4: ida_typeinf.BTF_UINT32, 8: ida_typeinf.BTF_UINT64}.get(size, ida_typeinf.BTF_UINT8))
+            if size not in (1, 2, 4, 8):
+                element = ida_typeinf.tinfo_t(member_type)
+                if not member_type.create_array(element, size):
+                    return {"error": "Cannot create member array type"}
+        actual_offset = (0 if tif.is_union() else tif.get_size()) if offset == -1 else offset
+        tif.add_udm(member_name, member_type, actual_offset * 8)
+        members = get_struct_details(struct_name).get('members', [])
+        ok = any(m['name'] == member_name and m['offset_dec'] == actual_offset and m['size'] == size for m in members)
+        return {"success": ok, "struct": struct_name, "member": member_name, "offset": hex(actual_offset)}
     return safe_write(_inner)
 
 def create_enum_api(name, width=4):
     """Create a new enum."""
     def _inner():
+        width_checked = bounded_int(width, 'width', 1, 8)
+        if width_checked not in (1, 2, 4, 8):
+            return {"error": "Enum width must be 1, 2, 4 or 8 bytes"}
+        if idc.get_enum(name) != idc.BADADDR:
+            return {"error": f"Enum '{name}' already exists"}
         eid = idc.add_enum(-1, name, 0)
         if eid == idc.BADADDR:
             return {"error": f"Failed to create enum '{name}'"}
-        return {"success": True, "name": name, "id": eid}
+        idc.set_enum_width(eid, width_checked)
+        if idc.get_enum_width(eid) != width_checked:
+            idc.del_enum(eid)
+            return {"error": "IDA refused the enum width"}
+        return {"success": idc.get_enum_width(eid) == width_checked, "name": name, "id": eid, "width": width_checked}
     return safe_write(_inner)
 
 def add_enum_member_api(enum_name, member_name, value):
@@ -733,7 +796,11 @@ def add_enum_member_api(enum_name, member_name, value):
 def rename_function(ea, new_name):
     """Rename function at ea."""
     def _inner():
-        ok = ida_name.set_name(ea, new_name, ida_name.SN_NOWARN | ida_name.SN_FORCE)
+        func = ida_funcs.get_func(ea)
+        if not func or func.start_ea != ea:
+            return {"error": "Address must be a function start"}
+        ok = ida_name.set_name(ea, new_name, ida_name.SN_NOWARN)
+        ok = bool(ok) and ida_name.get_name(ea) == new_name
         return {"success": ok, "ea": hex(ea), "new_name": new_name}
     return safe_write(_inner)
 
@@ -764,18 +831,16 @@ def rename_local_var(func_ea, old_name, new_name):
             return {"error": f"Decompilation failed: {str(e)}"}
         if cfunc is None:
             return {"error": "Decompilation returned None"}
-        found = False
-        for lv in cfunc.lvars:
-            if lv.name == old_name:
-                lv.name = new_name
-                found = True
-                break
-        if not found:
+        if not any(lv.name == old_name for lv in cfunc.lvars):
             available = [lv.name for lv in cfunc.lvars]
             return {"error": f"Variable '{old_name}' not found", "available_vars": available}
-        cfunc.save_user_lvars()
-        ida_hexrays.clear_cached_cfuncs()
-        return {"success": True, "ea": hex(func_ea), "old": old_name, "new": new_name}
+        if any(lv.name == new_name and lv.name != old_name for lv in cfunc.lvars):
+            return {"error": "Another variable already has the requested name"}
+        ok = bool(ida_hexrays.rename_lvar(cfunc.entry_ea, old_name, new_name))
+        ida_hexrays.mark_cfunc_dirty(cfunc.entry_ea)
+        refreshed = ida_hexrays.decompile(cfunc.entry_ea)
+        ok = ok and any(lv.name == new_name for lv in refreshed.lvars)
+        return {"success": ok, "ea": hex(func_ea), "old": old_name, "new": new_name}
     return safe_write(_inner)
 
 def create_struct(c_definition):
@@ -953,9 +1018,10 @@ def _do_rollback(actions):
 
 def get_call_graph(ea, depth=3):
     """Get recursive call graph from function."""
+    depth = bounded_int(depth, 'depth', 1, 20)
     visited = set()
     def _walk(addr, d):
-        if d <= 0 or addr in visited:
+        if d <= 0 or addr in visited or len(visited) >= MAX_FUNCTIONS:
             return None
         visited.add(addr)
         def _inner():
@@ -1180,12 +1246,14 @@ def get_function_gaps():
 
 def patch_bytes_at(ea, hex_bytes):
     """Patch bytes at address. hex_bytes: '90 90 90' or '909090'."""
+    data = bytes.fromhex(hex_bytes)
+    bounded_int(len(data), 'patch size', 1, MAX_TRANSFER)
     def _inner():
-        clean = hex_bytes.replace(' ', '')
-        data = bytes.fromhex(clean)
-        for i, b in enumerate(data):
-            ida_bytes.patch_byte(ea + i, b)
-        return {"success": True, "ea": hex(ea), "size": len(data), "patched": hex_bytes}
+        if ida_bytes.get_bytes(ea, len(data)) is None:
+            return {'success': False, 'error': 'Patch range must contain initialized bytes'}
+        ida_bytes.patch_bytes(ea, data)
+        ok = ida_bytes.get_bytes(ea, len(data)) == data
+        return {"success": ok, "ea": hex(ea), "size": len(data), "patched": hex_bytes}
     return safe_write(_inner)
 
 def make_code_at(ea, size=0):
@@ -1219,7 +1287,7 @@ def undefine_range(ea, size):
 def set_name_at(ea, name):
     """Set name at any address (not just functions)."""
     def _inner():
-        ok = ida_name.set_name(ea, name, ida_name.SN_NOWARN | ida_name.SN_FORCE)
+        ok = ida_name.set_name(ea, name, ida_name.SN_NOWARN) and ida_name.get_name(ea) == name
         return {"success": ok, "ea": hex(ea), "name": name}
     return safe_write(_inner)
 
@@ -1238,13 +1306,10 @@ def apply_struct_at(ea, struct_name):
 def delete_struct_api(name):
     """Delete a structure."""
     def _inner():
-        import ida_struct
-        sid = idc.get_struc_id(name)
-        if sid == idc.BADADDR:
+        tif = ida_typeinf.tinfo_t()
+        if not tif.get_named_type(ida_typeinf.get_idati(), name) or not (tif.is_struct() or tif.is_union()):
             return {"error": f"Structure '{name}' not found"}
-        sptr = ida_struct.get_struc(sid)
-        ok = ida_struct.del_struc(sptr)
-        return {"success": ok, "name": name}
+        return delete_local_type(name)
     return safe_write(_inner)
 
 def delete_enum_api(name):
@@ -1254,7 +1319,7 @@ def delete_enum_api(name):
         if eid == idc.BADADDR:
             return {"error": f"Enum '{name}' not found"}
         idc.del_enum(eid)
-        return {"success": True, "name": name}
+        return {"success": idc.get_enum(name) == idc.BADADDR, "name": name}
     return safe_write(_inner)
 
 def add_bookmark_api(ea, description, slot=-1):
@@ -1409,19 +1474,43 @@ def get_ctree_json(ea):
     return safe_read(_inner)
 
 def set_lvar_type_api(func_ea, var_name, type_str):
-    if not HAS_HEXRAYS: return {"error": "Hex-Rays not available"}
+    return _modify_lvar(func_ea, var_name, type_str=type_str)
+
+
+def _modify_lvar(func_ea, var_name, *, type_str=None, comment=None):
+    if not HAS_HEXRAYS:
+        return {"error": "Hex-Rays not available"}
     def _inner():
-        try: cfunc = ida_hexrays.decompile(func_ea)
-        except: return {"error": f"Decompile failed at {hex(func_ea)}"}
-        if not cfunc: return {"error": "None"}
-        for lv in cfunc.lvars:
-            if lv.name == var_name:
-                tif = ida_typeinf.tinfo_t()
-                if ida_typeinf.parse_decl(tif, None, f"{type_str};", ida_typeinf.PT_SIL):
-                    lv.set_lvar_type(tif); cfunc.save_user_lvars(); ida_hexrays.clear_cached_cfuncs()
-                    return {"success":True,"ea":hex(func_ea),"var":var_name,"type":type_str}
-                return {"error":f"Cannot parse type: {type_str}"}
-        return {"error":f"Var '{var_name}' not found","available":[v.name for v in cfunc.lvars]}
+        cfunc = ida_hexrays.decompile(func_ea)
+        if not cfunc:
+            return {"error": "Decompilation returned None"}
+        variable = next((v for v in cfunc.lvars if v.name == var_name), None)
+        if variable is None:
+            return {"error": f"Var '{var_name}' not found"}
+        info = ida_hexrays.lvar_saved_info_t()
+        info.ll = ida_hexrays.lvar_locator_t(variable.location, variable.defea)
+        if type_str is not None:
+            tif = ida_typeinf.tinfo_t()
+            ida_typeinf.parse_decl(tif, None, type_str.rstrip(';') + ';', ida_typeinf.PT_TYP | ida_typeinf.PT_SIL)
+            if tif.empty():
+                return {"error": f"Cannot parse type: {type_str}"}
+            info.type = tif
+            flags = ida_hexrays.MLI_TYPE
+        else:
+            info.cmt = comment
+            flags = ida_hexrays.MLI_CMT
+        ok = bool(ida_hexrays.modify_user_lvar_info(cfunc.entry_ea, flags, info))
+        ida_hexrays.mark_cfunc_dirty(cfunc.entry_ea)
+        refreshed = ida_hexrays.decompile(cfunc.entry_ea)
+        found = next((v for v in refreshed.lvars if v.name == var_name), None)
+        if type_str is not None:
+            ok = ok and found is not None and found.type() == info.type
+        else:
+            saved = ida_hexrays.lvar_uservec_t()
+            ida_hexrays.restore_user_lvar_settings(saved, cfunc.entry_ea)
+            ok = ok and any(v.ll == info.ll and v.cmt == comment for v in saved.lvvec)
+        return {"success": bool(ok), "ea": hex(func_ea), "var": var_name,
+                **({"type": str(info.type)} if type_str is not None else {"comment": comment})}
     return safe_write(_inner)
 
 def get_lvar_map(ea):
@@ -1438,17 +1527,7 @@ def get_lvar_map(ea):
     return safe_read(_inner)
 
 def set_lvar_comment_api(func_ea, var_name, cmt):
-    if not HAS_HEXRAYS: return {"error": "Hex-Rays not available"}
-    def _inner():
-        try: cfunc = ida_hexrays.decompile(func_ea)
-        except: return {"error": "Decompile failed"}
-        if not cfunc: return {"error": "None"}
-        for lv in cfunc.lvars:
-            if lv.name == var_name:
-                lv.cmt = cmt; cfunc.save_user_lvars()
-                return {"success":True,"ea":hex(func_ea),"var":var_name,"comment":cmt}
-        return {"error":f"Var '{var_name}' not found"}
-    return safe_write(_inner)
+    return _modify_lvar(func_ea, var_name, comment=cmt)
 
 # ─── Microcode API ───────────────────────────────────────────────────────────
 
@@ -1658,7 +1737,7 @@ def dbg_detach():
 def dbg_set_bp(ea, is_hw=False):
     def _inner():
         import ida_dbg
-        if is_hw: ok = ida_dbg.add_bpt(ea, 1, ida_dbg.BPT_DEFAULT)
+        if is_hw: ok = ida_dbg.add_bpt(ea, 1, ida_dbg.BPT_EXEC)
         else: ok = ida_dbg.add_bpt(ea)
         return {"success":ok,"ea":hex(ea),"hardware":is_hw}
     return safe_write(_inner)
@@ -1712,6 +1791,8 @@ def dbg_pause_api():
 def dbg_get_regs():
     def _inner():
         import ida_dbg, ida_idd
+        if not ida_dbg.is_debugger_on():
+            return {'error': 'No active debugger'}
         regs = {}
         rv = ida_idd.regval_t()
         for name in ["rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15","rip","eflags",
@@ -1724,6 +1805,7 @@ def dbg_get_regs():
     return safe_read(_inner)
 
 def dbg_read_mem(ea, size):
+    size = bounded_int(size, 'memory read size', 1, MAX_TRANSFER)
     def _inner():
         import ida_dbg, ida_idd
         if not ida_dbg.is_debugger_on():
@@ -1734,13 +1816,14 @@ def dbg_read_mem(ea, size):
     return safe_read(_inner)
 
 def dbg_write_mem(ea, hex_bytes):
+    data = bytes.fromhex(hex_bytes)
+    bounded_int(len(data), 'memory write size', 1, MAX_TRANSFER)
     def _inner():
         import ida_dbg, ida_idd
         if not ida_dbg.is_debugger_on():
             return {"error": "No active debugger"}
-        data = bytes.fromhex(hex_bytes.replace(' ',''))
         ok = ida_idd.dbg_write_memory(ea, data)
-        return {"success":ok>0,"ea":hex(ea),"size":len(data)}
+        return {"success":ok == len(data),"ea":hex(ea),"size":len(data),"written":ok}
     return safe_write(_inner)
 
 def dbg_get_threads():
@@ -1852,6 +1935,8 @@ def get_selection_range():
     return safe_read(_inner)
 
 def get_functions_paginated(offset=0, limit=500):
+    offset = bounded_int(offset, 'offset', 0, 2 ** 31 - 1)
+    limit = bounded_int(limit, 'limit', 1, MAX_FUNCTIONS)
     def _inner():
         funcs = []; count = 0; skip = 0
         for ea in idautils.Functions():
@@ -1867,55 +1952,84 @@ def get_functions_paginated(offset=0, limit=500):
 # ─── HTTP Request Handler ────────────────────────────────────────────────────
 
 def parse_ea(ea_str):
-    """Parse hex address string to integer."""
-    ea_str = ea_str.strip()
-    if ea_str.startswith("0x") or ea_str.startswith("0X"):
-        return int(ea_str, 16)
-    try:
-        return int(ea_str, 16)
-    except ValueError:
-        return int(ea_str)
+    """Strings use hexadecimal notation; JSON integers are numeric addresses."""
+    if isinstance(ea_str, bool) or not isinstance(ea_str, (str, int)):
+        raise ValueError('Address must be a hexadecimal string or an integer')
+    value = int(ea_str.strip(), 16) if isinstance(ea_str, str) else ea_str
+    if not 0 <= value < ida_idaapi.BADADDR:
+        raise ValueError('Address is outside the IDA address range')
+    return value
+
+
+def bounded_int(value, name, minimum, maximum):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f'{name} must be an integer')
+    result = int(value)
+    if not minimum <= result <= maximum:
+        raise ValueError(f'{name} must be between {minimum} and {maximum}')
+    return result
 
 
 def get_analyze_context(ea):
     def _inner():
-        ctx = {}
-        try: ctx["pseudocode"] = get_pseudocode(ea)().get("pseudocode")
-        except Exception: ctx["pseudocode"] = None
-        try: ctx["lvars"] = get_lvar_map(ea)().get("lvars", {})
-        except Exception: ctx["lvars"] = {}
-        try: ctx["callers"] = get_callers(ea)().get("callers", [])
-        except Exception: ctx["callers"] = []
-        try: ctx["callees"] = get_callees(ea)().get("callees", [])
-        except Exception: ctx["callees"] = []
-        try: ctx["strings_used"] = get_strings_used(ea)().get("strings", [])
-        except Exception: ctx["strings_used"] = []
-        try: ctx["xrefs_to"] = get_xrefs_to(ea)().get("xrefs", [])
-        except Exception: ctx["xrefs_to"] = []
-        try: ctx["basic_blocks"] = get_basic_blocks(ea)().get("blocks", [])
-        except Exception: ctx["basic_blocks"] = []
+        ctx, errors = {"ea": hex(ea)}, {}
+        for name, function, field in [
+            ('pseudocode', get_pseudocode, 'pseudocode'), ('lvars', get_lvar_map, 'lvars'),
+            ('callers', get_callers, 'callers'), ('callees', get_callees, 'callees'),
+            ('strings_used', get_strings_used, 'strings'), ('xrefs_to', get_xrefs_to, 'xrefs_to'),
+            ('basic_blocks', get_basic_blocks, 'blocks'),
+        ]:
+            ctx[name] = None if name == 'pseudocode' else []
+            try:
+                result = function(ea)
+                if result.get('error'):
+                    errors[name] = result['error']
+                else:
+                    ctx[name] = result[field]
+            except Exception as exc:
+                errors[name] = str(exc)
+        ctx['partial'] = bool(errors)
+        if errors:
+            ctx['errors'] = errors
         return ctx
     return safe_read(_inner)
 
 
 # --- Micro Router ---
 import queue
-sse_queue = queue.Queue(maxsize=256)
+_event_subscribers = set()
+_event_lock = threading.Lock()
 
 
 def _publish_event(event):
     """Publish an event without allowing UI hooks to block IDA."""
-    try:
-        sse_queue.put_nowait(event)
-    except queue.Full:
-        try:
-            sse_queue.get_nowait()
-        except queue.Empty:
-            pass
-        try:
-            sse_queue.put_nowait(event)
-        except queue.Full:
-            pass
+    with _event_lock:
+        subscribers = tuple(_event_subscribers)
+        for subscriber in subscribers:
+            try:
+                subscriber.put_nowait(event)
+            except queue.Full:
+                # A slow consumer gets an explicit gap instead of silently losing events.
+                try:
+                    while True:
+                        subscriber.get_nowait()
+                except queue.Empty:
+                    pass
+                subscriber.put_nowait({'event': 'resync_required'})
+
+
+def _subscribe_events():
+    with _event_lock:
+        if len(_event_subscribers) >= 4:
+            raise ValueError('At most four event subscribers are supported')
+        subscriber = queue.Queue(maxsize=256)
+        _event_subscribers.add(subscriber)
+        return subscriber
+
+
+def _unsubscribe_events(subscriber):
+    with _event_lock:
+        _event_subscribers.discard(subscriber)
 
 GET_ROUTES = []
 POST_ROUTES = []
@@ -1935,7 +2049,7 @@ def post_route(pattern):
 @get_route(r'/api/macro/analyze_context')
 def route_macro_analyze_context(self, match, params):
     ea = parse_ea(params.get("ea", ["0"])[0])
-    self.send_json(get_analyze_context(ea)())
+    self.send_json(get_analyze_context(ea))
 
 class Ph4ntomUIHooks(ida_kernwin.UI_Hooks):
     def screen_ea_changed(self, ea, prev_ea):
@@ -2021,12 +2135,13 @@ def route_do_get_14(self, match, params):
         'auth_enabled': AUTH_ENABLED,
         'dynamic_exec_enabled': ALLOW_SCRIPT_EXECUTION,
         'header_import_enabled': bool(ALLOWED_IMPORT_ROOTS),
+        'read_only': READ_ONLY,
     })
 
 @get_route(r'/api/struct/.*')
 def route_do_get_15(self, match, params):
     parts = match.string.split('/')
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(get_struct_details(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/struct/<name>')
@@ -2034,7 +2149,7 @@ def route_do_get_15(self, match, params):
 @get_route(r'/api/enum/.*')
 def route_do_get_16(self, match, params):
     parts = match.string.split('/')
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(get_enum_details(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/enum/<name>')
@@ -2042,7 +2157,7 @@ def route_do_get_16(self, match, params):
 @get_route(r'/api/vtable/.*')
 def route_do_get_17(self, match, params):
     parts = match.string.split('/')
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(get_vtable(parse_ea(parts[3])))
     else:
         self.send_error_json('Use /api/vtable/<ea>')
@@ -2050,7 +2165,7 @@ def route_do_get_17(self, match, params):
 @get_route(r'/api/bytes/.*')
 def route_do_get_18(self, match, params):
     parts = match.string.split('/')
-    if len(parts) >= 5:
+    if len(parts) == 5:
         self.send_json(read_bytes(parse_ea(parts[3]), int(parts[4])))
     else:
         self.send_error_json('Use /api/bytes/<ea>/<size>')
@@ -2058,7 +2173,7 @@ def route_do_get_18(self, match, params):
 @get_route(r'/api/search-func/.*')
 def route_do_get_19(self, match, params):
     parts = match.string.split('/', 4)
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(find_func_by_name(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/search-func/<name>')
@@ -2066,7 +2181,7 @@ def route_do_get_19(self, match, params):
 @get_route(r'/api/search-bytes/.*')
 def route_do_get_20(self, match, params):
     parts = match.string.split('/', 4)
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(search_bytes(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/search-bytes/<pattern>')
@@ -2074,7 +2189,7 @@ def route_do_get_20(self, match, params):
 @get_route(r'/api/function/.*')
 def route_do_get_21(self, match, params):
     parts = match.string.split('/')
-    if len(parts) < 5:
+    if len(parts) != 5:
         self.send_error_json('Invalid path. Use /api/function/<ea>/<action>')
         return
     ea = parse_ea(parts[3])
@@ -2121,7 +2236,7 @@ def route_do_get_21(self, match, params):
 @get_route(r'/api/search-text/.*')
 def route_do_get_22(self, match, params):
     parts = match.string.split('/', 4)
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(search_text_in_disasm(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/search-text/<text>')
@@ -2175,7 +2290,7 @@ def route_do_get_32(self, match, params):
 @get_route(r'/api/type/.*')
 def route_do_get_33(self, match, params):
     parts = match.string.split('/', 4)
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(get_type_by_name(unquote(parts[3])))
     else:
         self.send_error_json('Use /api/type/<name>')
@@ -2183,7 +2298,7 @@ def route_do_get_33(self, match, params):
 @get_route(r'/api/insn/.*')
 def route_do_get_34(self, match, params):
     parts = match.string.split('/')
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(get_instruction(parse_ea(parts[3])))
     else:
         self.send_error_json('Use /api/insn/<ea>')
@@ -2191,7 +2306,7 @@ def route_do_get_34(self, match, params):
 @get_route(r'/api/operands/.*')
 def route_do_get_35(self, match, params):
     parts = match.string.split('/')
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(get_operands(parse_ea(parts[3])))
     else:
         self.send_error_json('Use /api/operands/<ea>')
@@ -2199,7 +2314,7 @@ def route_do_get_35(self, match, params):
 @get_route(r'/api/data-xrefs/.*')
 def route_do_get_36(self, match, params):
     parts = match.string.split('/')
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(get_data_xrefs(parse_ea(parts[3])))
     else:
         self.send_error_json('Use /api/data-xrefs/<ea>')
@@ -2207,7 +2322,7 @@ def route_do_get_36(self, match, params):
 @get_route(r'/api/code-xrefs/.*')
 def route_do_get_37(self, match, params):
     parts = match.string.split('/')
-    if len(parts) >= 4:
+    if len(parts) == 4:
         self.send_json(get_code_xrefs(parse_ea(parts[3])))
     else:
         self.send_error_json('Use /api/code-xrefs/<ea>')
@@ -2241,7 +2356,7 @@ def route_do_post_0(self, match, data):
 @post_route(r'/api/function/.*')
 def route_do_post_1(self, match, data):
     parts = match.string.split('/')
-    if len(parts) < 5:
+    if len(parts) != 5:
         self.send_error_json('Invalid path')
         return
     ea = parse_ea(parts[3])
@@ -2406,7 +2521,7 @@ def route_do_post_23(self, match, data):
 @post_route(r'/api/address/.*')
 def route_do_post_24(self, match, data):
     parts = match.string.split('/')
-    if len(parts) < 5:
+    if len(parts) != 5:
         self.send_error_json('Invalid path')
         return
     ea = parse_ea(parts[3])
@@ -2495,161 +2610,243 @@ def route_do_post_43(self, match, data):
 
 @get_route(r'/api/events')
 def route_events(self, match, params):
-    self.send_response(200)
-    self.send_header('Content-Type', 'text/event-stream')
-    self.send_header('Cache-Control', 'no-cache')
-    self.send_header('Connection', 'keep-alive')
-    origin = self.headers.get('Origin', '')
-    if self._is_local_origin(origin):
-        self.send_header('Access-Control-Allow-Origin', origin)
-        self.send_header('Vary', 'Origin')
-    self.end_headers()
-
-    while True:
-        try:
-            event = sse_queue.get(timeout=1.0)
-            self.wfile.write(f"data: {json.dumps(event)}\n\n".encode('utf-8'))
+    subscriber = _subscribe_events()
+    try:
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Connection', 'keep-alive')
+        origin = self.headers.get('Origin', '')
+        if self._is_local_origin(origin):
+            self.send_header('Access-Control-Allow-Origin', origin)
+            self.send_header('Vary', 'Origin')
+        self.end_headers()
+        self.wfile.write(b': connected\n\n')
+        self.wfile.flush()
+        while not self.server.stopping.is_set():
+            try:
+                event = subscriber.get(timeout=1.0)
+                payload = f"data: {json.dumps(event)}\n\n".encode('utf-8')
+            except queue.Empty:
+                payload = b': ping\n\n'
+            self.wfile.write(payload)
             self.wfile.flush()
-        except queue.Empty:
-            self.wfile.write(b": ping\n\n")
-            self.wfile.flush()
-        except Exception:
-            break
+    except OSError:
+        pass
+    finally:
+        _unsubscribe_events(subscriber)
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
-    """HTTP handler for the ph4ntom IDA Bridge."""
+    """Bounded authenticated HTTP transport; no IDA work in request logging."""
 
     server_version = "ph4ntomIDABridge/" + BRIDGE_VERSION
 
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(REQUEST_TIMEOUT)
+
     def log_message(self, format, *args):
-        """Log to IDA output window."""
-        msg = format % args
-        safe_read(lambda: ida_kernwin.msg(f"[ph4ntom] {msg}\n"))
+        # BaseHTTPRequestHandler logs from worker threads. Calling execute_sync
+        # here can deadlock discovery or shutdown while the UI thread is busy.
+        pass
 
     def send_json(self, data, status=200):
-        payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        origin = self.headers.get("Origin", "")
-        if self._is_local_origin(origin):
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
-        self.end_headers()
-        self.wfile.write(payload)
+        payload = json.dumps(data, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        self.close_connection = True
+        try:
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(payload)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Connection', 'close')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            origin = self.headers.get('Origin', '')
+            if self._is_local_origin(origin):
+                self.send_header('Access-Control-Allow-Origin', origin)
+                self.send_header('Vary', 'Origin')
+            self.end_headers()
+            self.wfile.write(payload)
+        except OSError:
+            pass
 
     def send_error_json(self, message, status=400):
-        self.send_json({"error": message}, status)
+        self.send_json({'success': False, 'error': message}, status)
 
     @staticmethod
     def _is_local_origin(origin):
-        if not origin:
-            return False
         try:
-            return urlparse(origin).hostname in ("127.0.0.1", "localhost", "::1")
+            parsed = urlparse(origin)
+            return (parsed.scheme in ('http', 'https') and parsed.hostname in ('127.0.0.1', 'localhost', '::1')
+                    and not (parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment)
+                    and (parsed.port is None or 1 <= parsed.port <= 65535))
         except ValueError:
             return False
 
     def _check_host(self):
-        host_header = self.headers.get("Host", "")
-        try:
-            hostname = urlparse("//" + host_header).hostname
-        except ValueError:
-            hostname = None
-        if hostname in ("127.0.0.1", "localhost", "::1"):
-            return True
-        self.send_error_json("Invalid Host header", 403)
-        return False
+        hosts = self.headers.get_all('Host', [])
+        allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+        if len(hosts) != 1 or hosts[0] not in allowed:
+            self.send_error_json('Invalid Host header', 403)
+            return False
+        origins = self.headers.get_all('Origin', [])
+        if len(origins) > 1 or (origins and not self._is_local_origin(origins[0])):
+            self.send_error_json('Origin is not allowed', 403)
+            return False
+        if not self.path.startswith('/api/') or self.path.startswith('//'):
+            self.send_error_json('Invalid API request target', 400)
+            return False
+        return True
 
     def _check_auth(self):
+        auth = self.headers.get_all('Authorization', [])
+        if len(auth) > 1:
+            self.send_error_json('Ambiguous Authorization header', 401)
+            return False
         if not AUTH_ENABLED:
             return True
-        auth = self.headers.get('Authorization', '')
-        if secrets.compare_digest(auth, f'Bearer {AUTH_TOKEN}'):
+        if auth and secrets.compare_digest(auth[0], f'Bearer {self.server.auth_token}'):
             return True
-        # Allow unauthenticated ping and schema for discovery
-        parsed = urlparse(self.path)
-        if parsed.path.rstrip('/') in ('/api/ping', '/api/schema'):
+        if self.command == 'GET' and urlparse(self.path).path.rstrip('/') in ('/api/ping', '/api/schema'):
             return True
-        self.send_json({
-            "error": "Unauthorized. Pass the session token as an Authorization Bearer header.",
-            "token_file": _token_path,
-        }, 401)
+        self.send_error_json('Unauthorized. Supply the session bearer token.', 401)
         return False
 
     def do_OPTIONS(self):
-        origin = self.headers.get("Origin", "")
+        if not self._check_host():
+            return
+        origin = self.headers.get('Origin', '')
         if not self._is_local_origin(origin):
-            self.send_error_json("Origin is not allowed", 403)
+            self.send_error_json('Origin is required', 403)
             return
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Max-Age", "600")
-        self.send_header("Vary", "Origin")
+        self.send_header('Access-Control-Allow-Origin', origin)
+        self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Vary', 'Origin')
         self.end_headers()
+
+    def _dispatch(self, routes, path, data):
+        if self.server.stopping.is_set():
+            self.send_error_json('Bridge is stopping', 503)
+            return
+        for pattern, handler in routes:
+            match = pattern.fullmatch(path)
+            if match:
+                try:
+                    handler(self, match, data)
+                except (ValueError, TypeError, KeyError) as exc:
+                    self.send_error_json(str(exc), 400)
+                except Exception as exc:
+                    self.send_error_json(str(exc), 500)
+                return
+        self.send_error_json('Unknown API endpoint: ' + path, 404)
 
     def do_GET(self):
         if not self._check_host() or not self._check_auth():
             return
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
-        params = parse_qs(parsed.query)
-        for pattern, handler in GET_ROUTES:
-            m = pattern.match(path)
-            if m:
-                try: handler(self, m, params)
-                except Exception as e: self.send_error_json(str(e))
-                return
-        self.send_error_json("Unknown GET endpoint: " + path, 404)
+        try:
+            params = parse_qs(parsed.query, max_num_fields=64)
+        except ValueError:
+            self.send_error_json('Too many query parameters')
+            return
+        if any(len(values) != 1 for values in params.values()):
+            self.send_error_json('Duplicate query parameter')
+            return
+        self._dispatch(GET_ROUTES, parsed.path.rstrip('/'), params)
 
     def do_POST(self):
         if not self._check_host() or not self._check_auth():
             return
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
-        try:
-            content_length = int(self.headers.get("Content-Length", 0))
-        except (TypeError, ValueError):
-            self.send_error_json("Invalid Content-Length header", 400)
+        if READ_ONLY:
+            self.send_error_json('Bridge is configured read-only', 403)
             return
-        if content_length < 0:
-            self.send_error_json("Invalid Content-Length header", 400)
-            return
-        if content_length > MAX_BODY_SIZE:
-            self.send_error_json(
-                "Request body exceeds the maximum size of " + str(MAX_BODY_SIZE) + " bytes",
-                413,
-            )
+        lengths = self.headers.get_all('Content-Length', [])
+        if len(lengths) != 1 or self.headers.get_all('Transfer-Encoding'):
+            self.send_error_json('One Content-Length and no Transfer-Encoding are required')
             return
         try:
-            body = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
-        except UnicodeDecodeError:
-            self.send_error_json("Request body must be UTF-8", 400)
+            content_length = int(lengths[0])
+        except ValueError:
+            self.send_error_json('Invalid Content-Length')
+            return
+        if not 0 <= content_length <= MAX_BODY_SIZE:
+            self.send_error_json('Request body size is outside the allowed range', 413 if content_length > MAX_BODY_SIZE else 400)
+            return
+        content_types = self.headers.get_all('Content-Type', [])
+        if len(content_types) != 1 or content_types[0].split(';', 1)[0].strip().lower() != 'application/json':
+            self.send_error_json('Content-Type must be application/json', 415)
             return
         try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            self.send_error_json("Invalid JSON body", 400)
+            body = self.rfile.read(content_length)
+            if len(body) != content_length:
+                raise ValueError('Incomplete body')
+            data = json.loads(body.decode('utf-8') or '{}', object_pairs_hook=_strict_object, parse_constant=_invalid_constant)
+            if not isinstance(data, dict):
+                raise ValueError('JSON body must be an object')
+        except (ValueError, UnicodeError, RecursionError):
+            self.send_error_json('Invalid JSON object body')
             return
-        if not isinstance(data, dict):
-            self.send_error_json("JSON body must be an object", 400)
+        except (TimeoutError, socket.timeout):
+            self.send_error_json('Request body timed out', 408)
             return
-        for pattern, handler in POST_ROUTES:
-            m = pattern.match(path)
-            if m:
-                try: handler(self, m, data)
-                except Exception as e: self.send_error_json(str(e))
-                return
-        self.send_error_json("Unknown POST endpoint: " + path, 404)
+        self._dispatch(POST_ROUTES, urlparse(self.path).path.rstrip('/'), data)
 
-# ─── Server Lifecycle ────────────────────────────────────────────────────────
+
+def _strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('Duplicate JSON field')
+        result[key] = value
+    return result
+
+
+def _invalid_constant(value):
+    raise ValueError('Non-finite JSON number')
+
 
 class BridgeHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = False
+
+    def __init__(self, address, handler):
+        global AUTH_TOKEN, _token_path
+        if address[0] != HOST:
+            raise ValueError('Bridge must bind to 127.0.0.1')
+        self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self.stopping = threading.Event()
+        # Bind first. A second instance that cannot bind must not invalidate
+        # the first instance's working credentials.
+        super().__init__(address, handler)
+        try:
+            self.auth_token = secrets.token_hex(32)
+            self.token_path = _write_secure_token(self.auth_token)
+            AUTH_TOKEN, _token_path = self.auth_token, self.token_path
+        except Exception:
+            self.server_close()
+            raise
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+    def shutdown(self):
+        self.stopping.set()
+        super().shutdown()
 
 
 _server = None
@@ -2742,7 +2939,7 @@ def stop_server():
 # ─── IDA Plugin Interface ────────────────────────────────────────────────────
 
 class Ph4ntomPlugin(ida_idaapi.plugin_t):
-    flags = ida_idaapi.PLUGIN_KEEP
+    flags = 0
     comment = "ph4ntom IDA Bridge Server"
     help = "Starts an HTTP server for external AI agent control"
     wanted_name = "ph4ntom Bridge"
@@ -2750,6 +2947,8 @@ class Ph4ntomPlugin(ida_idaapi.plugin_t):
 
     def init(self):
         print("[ph4ntom] Plugin loaded. Press Ctrl+Shift+A to toggle server.")
+        if _env_flag('IDA_BRIDGE_AUTOSTART'):
+            start_server()
         return ida_idaapi.PLUGIN_KEEP
 
     def run(self, arg):

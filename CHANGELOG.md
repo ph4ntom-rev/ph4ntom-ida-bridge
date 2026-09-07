@@ -1,5 +1,29 @@
 # Changelog
 
+## 6.2.0 (2026-09-07)
+
+- Fixed IDA 9.3 structure member creation/deletion, enum widths, persistent
+  local-variable names/types/comments, combined analysis context, and saving
+  the current database with truthful status.
+- Verify byte patches and exact names after mutation; detect partial debugger
+  memory writes and use the correct hardware execution-breakpoint type.
+- Importing the plugin or failing to bind an occupied port no longer rotates
+  a running server's token. Windows token files use a protected owner-only DACL
+  before any secret bytes are written. Explicit token-file failures fail closed.
+- Reject remote/ambiguous headers, duplicate JSON fields, non-finite JSON,
+  malformed function paths, oversized reads and invalid pagination/depth.
+  Bound HTTP connections and body-read time; add a read-only server option.
+- Broadcast events to independent bounded subscriber queues, report overflow,
+  and release disconnected subscribers, including failed header writes.
+- Keep client tokens on loopback, ignore proxy/netrc environment settings,
+  prohibit redirects, and mark uncertain writes without replaying them.
+- MCP now reports bridge failures as protocol errors and annotates read/write
+  tools. Launch readiness probes respect the overall deadline.
+- Make plugin installation staged and recoverable with preserved backups;
+  add `doctor` and process-scoped launch autostart.
+- Expand socket/failure regression tests and licensed IDA integration checks,
+  including saving, exiting IDA and reopening the resulting database.
+
 ## 6.1.0
 
 ### Changed

@@ -1,5 +1,39 @@
 # IDA test checklist
 
+## Automated verification for 6.2.0
+
+```powershell
+python -m pip install ".[dev,mcp]"
+python -m pytest -q
+python -m flake8 . --select=F --exclude=.venv
+gcc tests/fixtures/batch_fixture.c -o batch_fixture.exe -O0 -g
+python tests/integration/run_ida.py --ida "C:\Path\To\IDA\idat.exe" --fixture batch_fixture.exe --report ida-results.json
+```
+
+The licensed integration runner creates a disposable database, exercises SDK
+reads/writes, tests batch preview and injected rollback failure, then saves,
+exits IDA, reopens the database in a second process and verifies persistent
+local-variable metadata, function names, structures and enum widths.
+Never pass an existing user database to this runner.
+
+For an installed wheel and a running IDA instance loaded with the exact compiled
+fixture, verify actual stdio MCP and REST paths from outside the source checkout:
+
+```powershell
+python tests/integration/verify_live.py --python "C:\Installed\venv\Scripts\python.exe" --fixture "C:\Test\batch_fixture.exe" --report live-results.json
+```
+
+The live test checks registration, resources, decompilation, analysis calls,
+preview, reversible rename, error propagation, script-execution refusal,
+saving, combined context, and concurrent event connections. It restores the
+fixture function name before saving.
+
+Local verification covers Windows and IDA Professional 9.3 with x64 Hex-Rays.
+Unit tests use Python 3.10 and 3.12. This is not certification for every IDA 9.x
+release, architecture, debugger backend, or third-party plugin combination.
+Debugger memory/breakpoint failure cases have stubbed regression coverage;
+full live debugger sessions and ARM targets require additional licensed tests.
+
 Use IDA Pro 9.x with a disposable binary and a copy of the IDA database. Do not
 use a production database for the first write/debugger tests.
 
@@ -32,7 +66,7 @@ Expected `ping` fields include:
 ```json
 {
   "status": "ok",
-  "version": "6.1.0",
+  "version": "6.2.0",
   "auth_enabled": true,
   "dynamic_exec_enabled": false
 }
