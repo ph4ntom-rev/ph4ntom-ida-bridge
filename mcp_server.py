@@ -12,17 +12,24 @@ import json
 from typing import Optional
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from core.client import BridgeClient
 
 client = BridgeClient()
 
 def _get(path: str, **params) -> dict:
     """GET request via BridgeClient."""
-    return client.call_api("GET", path, params)
+    return _checked(client.call_api("GET", path, params))
 
 def _post(path: str, data: Optional[dict] = None) -> dict:
     """POST request via BridgeClient."""
-    return client.call_api("POST", path, data)
+    return _checked(client.call_api("POST", path, data))
+
+
+def _checked(result: dict) -> dict:
+    if result.get('error') or result.get('success') is False:
+        raise ToolError(json.dumps(result, ensure_ascii=False))
+    return result
 
 
 def _component(value: object) -> str:
@@ -46,17 +53,17 @@ def api_schema() -> str:
 
 # ─── Core Analysis Tools ─────────────────────────────────────────────────────
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def ping() -> str:
     """Check if IDA Bridge is running and get version info."""
     return json.dumps(_get("/api/ping"))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_binary_info() -> str:
     """Get binary metadata: filename, processor, bitness, entry point, address range, hex-rays availability."""
     return json.dumps(_get("/api/info"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def list_functions(offset: int = 0, limit: int = 200) -> str:
     """List functions in the binary with pagination.
     
@@ -66,7 +73,7 @@ def list_functions(offset: int = 0, limit: int = 200) -> str:
     """
     return json.dumps(_get("/api/functions-page", offset=offset, limit=limit), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def decompile(ea: str) -> str:
     """Decompile function at address to C pseudocode. Returns pseudocode + local variables.
     
@@ -75,7 +82,7 @@ def decompile(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/pseudocode"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_disassembly(ea: str) -> str:
     """Get assembly listing for function at address.
     
@@ -84,7 +91,7 @@ def get_disassembly(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/disasm"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_ctree(ea: str) -> str:
     """Get Hex-Rays AST (ctree) as JSON for pattern matching and deep analysis. 
     Each node has kind(insn/expr), op, ea, dtype. Expressions include values, strings, objects, variables, call targets.
@@ -94,7 +101,7 @@ def get_ctree(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/ctree"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_microcode(ea: str, maturity: int = 7) -> str:
     """Get microcode IR listing. Maturity levels: 0=PREOPT (raw), 7=LVARS (fully optimized).
     Lower maturity is useful for deobfuscation analysis.
@@ -105,7 +112,7 @@ def get_microcode(ea: str, maturity: int = 7) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/microcode", maturity=maturity), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_local_variables(ea: str) -> str:
     """Get full local variable map with types, register/stack info for a function.
     
@@ -114,7 +121,7 @@ def get_local_variables(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/lvar-map"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_function_details(ea: str) -> str:
     """Get detailed function info: prototype, flags, frame size, comments.
     
@@ -125,7 +132,7 @@ def get_function_details(ea: str) -> str:
 
 # ─── Cross-References & Navigation ──────────────────────────────────────────
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_xrefs_to(ea: str) -> str:
     """Get all cross-references TO this address (who calls/references this).
     
@@ -134,7 +141,7 @@ def get_xrefs_to(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/xrefs-to"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_xrefs_from(ea: str) -> str:
     """Get all cross-references FROM this function (what it calls/references).
     
@@ -143,7 +150,7 @@ def get_xrefs_from(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/xrefs-from"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_callers(ea: str) -> str:
     """Get functions that call this function (caller graph).
     
@@ -152,7 +159,7 @@ def get_callers(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/callers"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_callees(ea: str) -> str:
     """Get functions called by this function (callee graph).
     
@@ -161,7 +168,7 @@ def get_callees(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/callees"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_call_graph(ea: str, depth: int = 3) -> str:
     """Get recursive call graph tree starting from function.
     
@@ -171,7 +178,7 @@ def get_call_graph(ea: str, depth: int = 3) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/call-graph", depth=depth), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_basic_blocks(ea: str) -> str:
     """Get control flow graph (basic blocks with successors/predecessors).
     
@@ -180,7 +187,7 @@ def get_basic_blocks(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/basic-blocks"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_strings_used(ea: str) -> str:
     """Get string constants referenced by a function.
     
@@ -191,7 +198,7 @@ def get_strings_used(ea: str) -> str:
 
 # ─── Search Tools ────────────────────────────────────────────────────────────
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def search_function(name: str) -> str:
     """Find functions by name (partial match).
     
@@ -200,7 +207,7 @@ def search_function(name: str) -> str:
     """
     return json.dumps(_get(f"/api/search-func/{_component(name)}"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def search_bytes(pattern: str) -> str:
     """Search for byte pattern in binary. Use ?? for wildcards.
     Example: 'E8 ?? ?? ?? ?? 48 8B'
@@ -210,7 +217,7 @@ def search_bytes(pattern: str) -> str:
     """
     return json.dumps(_get(f"/api/search-bytes/{_component(pattern)}"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def search_text(text: str) -> str:
     """Search for text in disassembly listings.
     
@@ -219,34 +226,34 @@ def search_text(text: str) -> str:
     """
     return json.dumps(_get(f"/api/search-text/{_component(text)}"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def list_strings() -> str:
     """List all strings found in the binary."""
     return json.dumps(_get("/api/strings"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def list_names() -> str:
     """List all named items (functions, variables, labels)."""
     return json.dumps(_get("/api/names"), indent=2)
 
 # ─── Binary Structure ────────────────────────────────────────────────────────
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def list_imports() -> str:
     """List imported functions grouped by module (DLL/library)."""
     return json.dumps(_get("/api/imports"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def list_exports() -> str:
     """List exported functions with addresses."""
     return json.dumps(_get("/api/exports"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def list_segments() -> str:
     """List memory segments with permissions (read/write/execute)."""
     return json.dumps(_get("/api/segments"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def read_bytes(ea: str, size: int) -> str:
     """Read raw bytes from binary at specified address.
     
@@ -256,7 +263,7 @@ def read_bytes(ea: str, size: int) -> str:
     """
     return json.dumps(_get(f"/api/bytes/{_component(ea)}/{size}"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def read_vtable(ea: str) -> str:
     """Read virtual function table entries at address.
     
@@ -267,12 +274,12 @@ def read_vtable(ea: str) -> str:
 
 # ─── Type System ─────────────────────────────────────────────────────────────
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def list_structs() -> str:
     """List all defined structures with sizes."""
     return json.dumps(_get("/api/structs"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_struct(name: str) -> str:
     """Get structure members with offsets, sizes, and types.
     
@@ -281,17 +288,17 @@ def get_struct(name: str) -> str:
     """
     return json.dumps(_get(f"/api/struct/{_component(name)}"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def list_enums() -> str:
     """List all defined enumerations."""
     return json.dumps(_get("/api/enums"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def list_types() -> str:
     """List all local types (structs, unions, enums, typedefs)."""
     return json.dumps(_get("/api/types"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_type(name: str) -> str:
     """Get detailed type information including struct/union members.
     
@@ -300,7 +307,7 @@ def get_type(name: str) -> str:
     """
     return json.dumps(_get(f"/api/type/{_component(name)}"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def create_type(definition: str) -> str:
     """Create a new type from C declaration.
     
@@ -311,7 +318,7 @@ def create_type(definition: str) -> str:
 
 # ─── Mutation Tools ──────────────────────────────────────────────────────────
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def rename_function(ea: str, name: str) -> str:
     """Rename function at address.
     
@@ -321,7 +328,7 @@ def rename_function(ea: str, name: str) -> str:
     """
     return json.dumps(_post(f"/api/function/{_component(ea)}/rename", {"name": name}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def comment_function(ea: str, comment: str) -> str:
     """Set function comment.
     
@@ -331,7 +338,7 @@ def comment_function(ea: str, comment: str) -> str:
     """
     return json.dumps(_post(f"/api/function/{_component(ea)}/comment", {"comment": comment}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def set_inline_comment(ea: str, comment: str) -> str:
     """Set inline comment at specific address.
     
@@ -341,7 +348,7 @@ def set_inline_comment(ea: str, comment: str) -> str:
     """
     return json.dumps(_post(f"/api/address/{_component(ea)}/comment", {"comment": comment}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def rename_variable(ea: str, old_name: str, new_name: str) -> str:
     """Rename local variable in a decompiled function.
     
@@ -352,7 +359,7 @@ def rename_variable(ea: str, old_name: str, new_name: str) -> str:
     """
     return json.dumps(_post(f"/api/function/{_component(ea)}/lvar-rename", {"old": old_name, "new": new_name}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def set_variable_type(ea: str, var_name: str, type_str: str) -> str:
     """Change local variable type in decompiled function.
     
@@ -363,7 +370,7 @@ def set_variable_type(ea: str, var_name: str, type_str: str) -> str:
     """
     return json.dumps(_post(f"/api/function/{_component(ea)}/lvar-set-type", {"var": var_name, "type": type_str}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def set_function_type(ea: str, prototype: str) -> str:
     """Set function prototype/signature.
     
@@ -373,7 +380,7 @@ def set_function_type(ea: str, prototype: str) -> str:
     """
     return json.dumps(_post(f"/api/function/{_component(ea)}/set-type", {"type": prototype}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def create_struct(definition: str) -> str:
     """Create structure from C definition.
     
@@ -382,7 +389,7 @@ def create_struct(definition: str) -> str:
     """
     return json.dumps(_post("/api/struct/create", {"definition": definition}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def patch_bytes(ea: str, hex_bytes: str) -> str:
     """Patch bytes in the binary. Use hex string with spaces.
     
@@ -392,7 +399,7 @@ def patch_bytes(ea: str, hex_bytes: str) -> str:
     """
     return json.dumps(_post("/api/patch-bytes", {"ea": ea, "bytes": hex_bytes}))
 
-@mcp.tool 
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def batch_mutations(mutations: str, dry_run: bool = False, mode: str = "rollback") -> str:
     """Prevalidate a batch and compensate supported name/comment values on failure.
     Pass a JSON array string of operations.
@@ -409,7 +416,7 @@ def batch_mutations(mutations: str, dry_run: bool = False, mode: str = "rollback
 
 # ─── Debugger Tools ──────────────────────────────────────────────────────────
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_start(path: str = "", args: str = "") -> str:
     """Start debugging the current binary or specified executable.
     
@@ -419,7 +426,7 @@ def dbg_start(path: str = "", args: str = "") -> str:
     """
     return json.dumps(_post("/api/dbg/start", {"path": path or None, "args": args}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_set_breakpoint(ea: str, hardware: bool = False) -> str:
     """Set a breakpoint at address.
     
@@ -429,27 +436,27 @@ def dbg_set_breakpoint(ea: str, hardware: bool = False) -> str:
     """
     return json.dumps(_post("/api/dbg/breakpoint", {"ea": ea, "hardware": hardware}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_continue() -> str:
     """Continue process execution (resume from breakpoint/pause)."""
     return json.dumps(_post("/api/dbg/continue"))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_step_into() -> str:
     """Step into the next instruction (follows calls)."""
     return json.dumps(_post("/api/dbg/step-into"))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_step_over() -> str:
     """Step over the next instruction (skips calls)."""
     return json.dumps(_post("/api/dbg/step-over"))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': True})
 def dbg_get_registers() -> str:
     """Read all CPU registers (debugger must be active)."""
     return json.dumps(_get("/api/dbg/regs"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': True})
 def dbg_read_memory(ea: str, size: int) -> str:
     """Read process memory at runtime (debugger must be active).
     
@@ -459,14 +466,14 @@ def dbg_read_memory(ea: str, size: int) -> str:
     """
     return json.dumps(_get(f"/api/dbg/memory/{_component(ea)}/{size}"), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': True})
 def dbg_get_stack() -> str:
     """Get call stack trace (debugger must be active)."""
     return json.dumps(_get("/api/dbg/stack"), indent=2)
 
 # ─── Utility Tools ───────────────────────────────────────────────────────────
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def execute_idapython(script: str) -> str:
     """Execute IDAPython with full SDK access when the server explicitly enables it.
     Use the global 'result' dict to return structured data.
@@ -476,17 +483,17 @@ def execute_idapython(script: str) -> str:
     """
     return json.dumps(_post("/api/exec", {"script": script}), indent=2)
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def undo() -> str:
     """Undo the last action in IDA."""
     return json.dumps(_post("/api/undo"))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def redo() -> str:
     """Redo the last undone action."""
     return json.dumps(_post("/api/redo"))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def navigate_to(ea: str) -> str:
     """Move IDA's cursor to the specified address.
     
@@ -495,7 +502,7 @@ def navigate_to(ea: str) -> str:
     """
     return json.dumps(_post("/api/navigate", {"ea": ea}))
 
-@mcp.tool
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
 def save_database() -> str:
     """Save the current IDA database (.idb/.i64)."""
     return json.dumps(_post("/api/save"))

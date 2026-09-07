@@ -4,6 +4,11 @@ ph4ntom IDA Bridge is a localhost-only control layer for IDA Pro 9.x. It
 combines a self-contained IDA plugin, a JSON REST API, a Python client, a CLI,
 54 MCP tools, and optional standalone AI backends.
 
+Version **6.2.0** improves IDA 9.3 compatibility, authentication, HTTP
+handling, event delivery, and installation recovery. See
+[CHANGELOG.md](CHANGELOG.md) for the changes and [TESTING.md](TESTING.md)
+for reproducible verification and its limits.
+
 The API schema currently documents 54 read endpoints and 48 write endpoints.
 The bridge has been validated against IDA Professional 9.3 in addition to the
 repository test suite, which covers the client, CLI, schema, routing contract,
@@ -62,7 +67,10 @@ python cli.py install-plugin --ida-dir "C:\Program Files\IDA Professional 9.0"
 ```
 
 If an older installed copy differs, review it and then use `--force`. The
-installer creates a `.bak` file before replacement.
+installer validates both source files before changing either, stages the pair,
+and backs up differing files before replacement. Existing `.bak` copies are
+preserved by choosing a unique backup name. A failed replacement restores files
+already changed; the JSON result reports backup locations and any rollback errors.
 
 Manual installation is also supported: copy both files below into IDA's
 `plugins` directory.
@@ -74,6 +82,16 @@ api_schema.json
 
 Start IDA and press `Ctrl+Shift+A` to toggle the server. The IDA output window
 shows the URL and token-file location, but never prints the token itself.
+
+To start the bridge automatically for a launched IDA process, use
+`ph4ntom-ida launch BINARY --ida-dir "C:\Path\To\IDA" --wait`, or set
+`IDA_BRIDGE_AUTOSTART=1` before starting IDA. Closing IDA stops the bridge.
+Only one instance can use the default port/token at a time.
+`ph4ntom-ida doctor` checks packaged resources and authenticated database access.
+
+For Codex, install with `python -m pip install ".[mcp]"` and configure the
+absolute path to that environment's Python executable with arguments
+`["-m", "mcp_server"]`. Restart the MCP client after changing its configuration.
 
 ## CLI quick start
 

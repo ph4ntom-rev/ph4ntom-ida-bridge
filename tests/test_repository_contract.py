@@ -10,9 +10,9 @@ def test_schema_and_project_versions_match():
     schema = json.loads((ROOT / "api_schema.json").read_text(encoding="utf-8"))
     agent_config = json.loads((ROOT / "agent_config.json").read_text(encoding="utf-8"))
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert schema["meta"]["version"] == "6.1.0"
-    assert agent_config["version"] == "6.1.0"
-    assert 'version = "6.1.0"' in pyproject
+    assert schema["meta"]["version"] == "6.2.0"
+    assert agent_config["version"] == "6.2.0"
+    assert 'version = "6.2.0"' in pyproject
 
 
 def test_schema_declares_expected_endpoint_coverage():

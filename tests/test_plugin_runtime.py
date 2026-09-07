@@ -73,7 +73,9 @@ def _load_plugin(monkeypatch, tmp_path):
 
 def test_plugin_imports_with_stubbed_ida_and_writes_secure_token(monkeypatch, tmp_path):
     plugin, token_file = _load_plugin(monkeypatch, tmp_path)
-
+    assert not token_file.exists()
+    server = plugin.BridgeHTTPServer(('127.0.0.1', 0), plugin.BridgeHandler)
+    server.server_close()
     token = token_file.read_text(encoding="utf-8")
     assert token == plugin.AUTH_TOKEN
     assert len(token) == 64

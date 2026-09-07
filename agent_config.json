@@ -1,6 +1,6 @@
 {
   "name": "ph4ntom IDA Bridge",
-  "version": "6.1.0",
+  "version": "6.2.0",
   "description": "AI agent interface to IDA Pro reverse engineering environment",
   "bridge_url": "http://127.0.0.1:13370",
   "auth": {

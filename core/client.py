@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -38,7 +39,7 @@ class BridgeClient:
     ) -> None:
         raw_url = url or os.environ.get("IDA_BRIDGE_URL", DEFAULT_BRIDGE_URL)
         self.base_url = self._normalize_url(raw_url)
-        if timeout <= 0:
+        if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be greater than zero")
         self.timeout = timeout
         self._explicit_token = token or os.environ.get("IDA_BRIDGE_TOKEN")
@@ -54,10 +55,17 @@ class BridgeClient:
             raise ValueError("Bridge URL must be an absolute http:// or https:// URL")
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("Bridge URL must not contain credentials, a query, or a fragment")
+        if parsed.hostname not in ('127.0.0.1', 'localhost', '::1'):
+            raise ValueError('Bridge URL must target loopback; session tokens must stay on this computer')
+        if parsed.path not in ('', '/'):
+            raise ValueError('Bridge URL must not contain a path')
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError('Invalid bridge port')
         return normalized
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
+        session.trust_env = False
         session.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
         self._load_token(session)
 
@@ -74,6 +82,8 @@ class BridgeClient:
         adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry_strategy)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
+        # Health probes must honor the launcher's overall readiness deadline.
+        session.mount(self.base_url + '/api/ping', HTTPAdapter(max_retries=0))
         return session
 
     def _token_candidates(self) -> Iterable[Path]:
@@ -81,10 +91,11 @@ class BridgeClient:
         candidates = []
         if self._explicit_token_file:
             candidates.append(Path(self._explicit_token_file).expanduser())
-        candidates.extend((
+        else:
+            candidates.extend((
             Path.home() / ".ph4ntom_ida_bridge_token",
             Path(tempfile.gettempdir()) / ".ph4ntom_ida_bridge_token",
-        ))
+            ))
         for candidate in candidates:
             key = os.path.normcase(os.path.abspath(str(candidate)))
             if key not in seen:
@@ -118,9 +129,12 @@ class BridgeClient:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
         """Send one API request and return a JSON-compatible result."""
+        if not isinstance(path, str) or not path.startswith('/api/') or any(c in path for c in ('\r', '\n', '#', '?')):
+            return {"error": "Path must start with /api/ and contain no query or fragment", "success": False}
         clean_path = path.lstrip("/")
         url = self.base_url + "/" + clean_path
         kwargs.setdefault("timeout", self.timeout)
+        kwargs['allow_redirects'] = False
 
         try:
             with self._request_lock:
@@ -128,6 +142,8 @@ class BridgeClient:
                 if response.status_code == 401 and self._refresh_token():
                     response = self.session.request(method, url, **kwargs)
 
+            if 300 <= response.status_code < 400:
+                return {"error": "Bridge redirects are not allowed", "success": False}
             response.raise_for_status()
             if not response.text.strip():
                 return {"success": True, "data": None}
@@ -136,7 +152,8 @@ class BridgeClient:
                 return payload
             return {"success": True, "data": payload}
         except requests.ConnectionError:
-            return {"error": f"IDA Bridge offline at {self.base_url}", "success": False}
+            return {"error": f"Cannot communicate with IDA Bridge at {self.base_url}", "success": False,
+                    **({"delivery_state": "uncertain", "hint": "Inspect IDA before repeating a write"} if method == 'POST' else {})}
         except JSONDecodeError:
             return {
                 "error": f"Invalid JSON response from server (HTTP {response.status_code})",
@@ -156,7 +173,8 @@ class BridgeClient:
                 "success": False,
             }
         except requests.exceptions.Timeout:
-            return {"error": "Request timed out", "success": False}
+            return {"error": "Request timed out", "success": False,
+                    **({"delivery_state": "uncertain", "hint": "Inspect IDA before repeating a write"} if method == 'POST' else {})}
         except RequestException as exc:
             return {"error": f"HTTP request failed: {exc}", "success": False}
 
@@ -183,8 +201,8 @@ class BridgeClient:
     def path_component(value: Any) -> str:
         return quote(str(value), safe="")
 
-    def ping(self) -> Dict[str, Any]:
-        return self.get("/api/ping")
+    def ping(self, timeout: Optional[float] = None) -> Dict[str, Any]:
+        return self._request('GET', '/api/ping', params={}, timeout=timeout or min(self.timeout, 5))
 
     def info(self) -> Dict[str, Any]:
         return self.get("/api/info")
@@ -214,8 +232,8 @@ class BridgeClient:
     def exec_python(self, script: str) -> Dict[str, Any]:
         return self.post("/api/exec", {"script": script})
 
-    def batch(self, mutations: list) -> Dict[str, Any]:
-        return self.post("/api/batch", {"mutations": mutations})
+    def batch(self, mutations: list, *, dry_run: bool = False, mode: str = 'rollback') -> Dict[str, Any]:
+        return self.post("/api/batch", {"mutations": mutations, "dry_run": dry_run, "mode": mode})
 
     def wait_analysis(self) -> Dict[str, Any]:
         return self.get("/api/wait-analysis")
