@@ -6,6 +6,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![IDA Pro 9.x](https://img.shields.io/badge/IDA_Pro-9.0--9.3-blueviolet?style=flat-square)](https://hex-rays.com)
 [![MCP Compatible](https://img.shields.io/badge/MCP-54_Tools_|_2_Resources-00c853?style=flat-square&logo=anthropic&logoColor=white)](#mcp-tools-reference)
+[![Glama Rating](https://glama.ai/mcp/servers/ph4ntom-rev/ph4ntom-ida-bridge/badges/score.svg)](https://glama.ai/mcp/servers/ph4ntom-rev/ph4ntom-ida-bridge)
 [![REST API](https://img.shields.io/badge/REST_API-102_Endpoints-orange?style=flat-square)](#rest-api)
 [![Release](https://img.shields.io/badge/release-v6.2.0-blue?style=flat-square)](https://github.com/ph4ntom-rev/ph4ntom-ida-bridge/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
