@@ -1,0 +1,51 @@
+name: Feature request / Question
+description: Suggest an idea, request support for something, or ask a question
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea or a question (e.g. support for a new IDA version)? Let us know!
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - Feature request
+        - Support for new IDA Pro version
+        - Question
+    validations:
+      required: true
+
+  - type: input
+    id: ida-version
+    attributes:
+      label: IDA Pro version (if relevant)
+      placeholder: "e.g. 9.5"
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What would you like to see or know? What problem does it solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: If you already tested something (e.g. running the bridge on a new IDA version), share the results and any errors.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+    validations:
+      required: false
