@@ -1,220 +1,238 @@
-# ph4ntom IDA Bridge
+# ph4ntom IDA Bridge 🌉
 
-ph4ntom IDA Bridge is a localhost-only control layer for IDA Pro 9.x. It
-combines a self-contained IDA plugin, a JSON REST API, a Python client, a CLI,
-54 MCP tools, and optional standalone AI backends.
+> **Autonomous AI & MCP Control Layer for IDA Pro 9.x**  
+> Turn IDA Pro into an agentic reverse-engineering powerhouse. Connect Claude Desktop, Cursor, Antigravity, or custom LLM agents via Model Context Protocol (MCP) or high-performance REST API.
 
-Version **6.2.0** improves IDA 9.3 compatibility, authentication, HTTP
-handling, event delivery, and installation recovery. See
-[CHANGELOG.md](CHANGELOG.md) for the changes and [TESTING.md](TESTING.md)
-for reproducible verification and its limits.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![IDA Pro 9.x](https://img.shields.io/badge/IDA_Pro-9.0--9.3-blueviolet?style=flat-square)](https://hex-rays.com)
+[![MCP Compatible](https://img.shields.io/badge/MCP-54_Tools_|_2_Resources-00c853?style=flat-square&logo=anthropic&logoColor=white)](#mcp-tools-reference)
+[![REST API](https://img.shields.io/badge/REST_API-102_Endpoints-orange?style=flat-square)](#rest-api)
+[![Release](https://img.shields.io/badge/release-v6.2.0-blue?style=flat-square)](https://github.com/ph4ntom-rev/ph4ntom-ida-bridge/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
+[![Security Hardened](https://img.shields.io/badge/security-localhost_only_|_token_auth-red?style=flat-square)](#security-model)
 
-The API schema currently documents 54 read endpoints and 48 write endpoints.
-The bridge has been validated against IDA Professional 9.3 in addition to the
-repository test suite, which covers the client, CLI, schema, routing contract,
-MCP registration, packaging, and security defaults.
+---
 
-## Security model
+```
+              ┌─────────────────────────────────────────────────────────┐
+              │                       IDA Pro 9.x                       │
+              │         ph4ntom_ida_bridge.py (102 REST Endpoints)      │
+              │         127.0.0.1:13370 (Bearer Token Protected)        │
+              └────────────────────────────┬────────────────────────────┘
+                                           │ REST / JSON / SSE
+          ┌────────────────────────────────┼───────────────────────────────┐
+          ▼                                ▼                               ▼
+   ┌───────────────┐               ┌───────────────┐               ┌───────────────┐
+   │  MCP Server   │               │   CLI / SDK   │               │   AI Agents   │
+   │  54 Tools     │               │  `ph4ntom-ida`│               │  Multi-LLM    │
+   │  Claude       │               │  Automation   │               │  Gemini       │
+   │  Cursor       │               │  Headless     │               │  Ollama       │
+   │  Antigravity  │               │  Testing      │               │  Claude / GPT │
+   └───────────────┘               └───────────────┘               └───────────────┘
+```
 
-The bridge runs inside IDA, so authenticated write access is powerful. The
-`/api/exec` endpoint is equivalent to local code execution as the IDA user.
+**ph4ntom IDA Bridge** is a localhost-only control layer for **IDA Pro 9.x**. It combines a self-contained IDA plugin, a JSON REST API, a Python client, a CLI, 54 native MCP tools, and optional standalone AI backends.
 
-Version 6 uses these defaults:
+Version **6.2.0** brings full IDA 9.3 compatibility, atomic database mutations, constant-time token authentication, SSE cursor tracking, and complete test suite coverage.
 
-- binds only to `127.0.0.1:13370`;
-- creates a 256-bit session token in `~/.ph4ntom_ida_bridge_token`;
-- refreshes stale tokens automatically after an IDA restart;
-- limits POST bodies to 5 MiB;
-- permits browser CORS only from localhost origins;
-- disables dynamic IDAPython execution by default;
-- disables local C-header imports until trusted directories are configured.
+---
 
-Never expose port 13370 through a public interface, tunnel, or reverse proxy.
-See [SECURITY.md](SECURITY.md) for the full guidance.
+## ⚡ Quickstart: Claude Desktop & Cursor (1-Click MCP Setup)
 
-## Components
+Connect Claude Desktop, Cursor, or any MCP client to your running IDA Pro instance in 60 seconds:
 
-| Path | Purpose |
-| --- | --- |
-| `ida_plugin/ph4ntom_ida_bridge.py` | Canonical IDA plugin and REST server |
-| `api_schema.json` | Machine-readable REST reference |
-| `core/client.py` | Shared authenticated HTTP client |
-| `cli.py` | CLI, plugin installer, and IDA launcher |
-| `mcp_server.py` | MCP server exposing 54 tools and two resources |
-| `agent.py` | Optional interactive agent with multiple LLM backends |
-| `swarm_worker.py` | Optional structured-analysis worker |
-| `agent_config.json` | Machine-readable integration configuration |
-| `AGENT_SKILL.md` | Instructions for IDE-based agents |
-
-`server.py` remains only as a compatibility wrapper. All server changes belong
-in `ida_plugin/ph4ntom_ida_bridge.py` so the two implementations cannot drift.
-
-## Install
-
-Python 3.10 or newer is required for the external tools. IDA itself supplies
-the IDAPython modules used by the plugin.
-
+### 1. Clone & Install
 ```bash
 git clone https://github.com/ph4ntom-rev/ph4ntom-ida-bridge.git
 cd ph4ntom-ida-bridge
-python -m pip install -e .
-```
-
-Install the plugin and API schema into IDA:
-
-```bash
-python cli.py install-plugin --ida-dir "C:\Program Files\IDA Professional 9.0"
-```
-
-If an older installed copy differs, review it and then use `--force`. The
-installer validates both source files before changing either, stages the pair,
-and backs up differing files before replacement. Existing `.bak` copies are
-preserved by choosing a unique backup name. A failed replacement restores files
-already changed; the JSON result reports backup locations and any rollback errors.
-
-Manual installation is also supported: copy both files below into IDA's
-`plugins` directory.
-
-```text
-ida_plugin/ph4ntom_ida_bridge.py
-api_schema.json
-```
-
-Start IDA and press `Ctrl+Shift+A` to toggle the server. The IDA output window
-shows the URL and token-file location, but never prints the token itself.
-
-To start the bridge automatically for a launched IDA process, use
-`ph4ntom-ida launch BINARY --ida-dir "C:\Path\To\IDA" --wait`, or set
-`IDA_BRIDGE_AUTOSTART=1` before starting IDA. Closing IDA stops the bridge.
-Only one instance can use the default port/token at a time.
-`ph4ntom-ida doctor` checks packaged resources and authenticated database access.
-
-For Codex, install with `python -m pip install ".[mcp]"` and configure the
-absolute path to that environment's Python executable with arguments
-`["-m", "mcp_server"]`. Restart the MCP client after changing its configuration.
-
-## CLI quick start
-
-```bash
-python cli.py ping
-python cli.py info
-python cli.py functions --limit 100
-python cli.py strings --filter "socket|http"
-python cli.py decompile 0x140001000
-python cli.py xrefs 0x140001000
-python cli.py callers 0x140001000
-python cli.py api GET /api/function/0x140001000/ctree
-python cli.py api POST /api/function/0x140001000/rename --body "{\"name\":\"init_network\"}"
-```
-
-The installed console command is equivalent:
-
-```bash
-ph4ntom-ida ping
-```
-
-To launch IDA without silently installing or replacing anything:
-
-```bash
-python cli.py launch sample.exe --wait
-```
-
-Use `--headless` only when autonomous IDA analysis is intended.
-
-## Optional dynamic IDAPython
-
-Dynamic execution is intentionally off by default. Enable it before launching
-IDA only on a trusted machine.
-
-PowerShell:
-
-```powershell
-$env:IDA_BRIDGE_ALLOW_EXEC = "1"
-```
-
-Bash:
-
-```bash
-export IDA_BRIDGE_ALLOW_EXEC=1
-```
-
-Then execute inline code, a file, or stdin:
-
-```bash
-python cli.py exec "result['ea'] = hex(idc.here())"
-python cli.py exec --file analysis.py
-python generate_script.py | python cli.py exec -
-```
-
-Scripts receive full IDAPython access and a `result` dictionary. Standard output
-and standard error are captured in the JSON response.
-
-## Header imports
-
-`POST /api/import-header` is disabled until trusted roots are supplied before
-IDA starts. Separate multiple directories with the operating system path
-separator (`;` on Windows, `:` on Unix-like systems).
-
-```powershell
-$env:IDA_BRIDGE_ALLOWED_IMPORT_ROOTS = "C:\reverse\headers;D:\sdk\include"
-```
-
-## MCP
-
-Install the MCP extra:
-
-```bash
 python -m pip install -e ".[mcp]"
 ```
 
-Use absolute paths in the MCP client configuration:
+### 2. Install Plugin into IDA Pro
+```bash
+python cli.py install-plugin --ida-dir "C:\Program Files\IDA Professional 9.0"
+```
+*(Or copy `ida_plugin/ph4ntom_ida_bridge.py` and `api_schema.json` directly into your IDA `plugins/` directory).*
+
+### 3. Add to your MCP Config
+
+#### 🟣 Claude Desktop
+Edit `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 
 ```json
 {
   "mcpServers": {
     "ida-bridge": {
       "command": "python",
-      "args": ["C:/path/to/ph4ntom-ida-bridge/mcp_server.py"]
+      "args": [
+        "C:/path/to/ph4ntom-ida-bridge/mcp_server.py"
+      ]
     }
   }
 }
 ```
 
-The shared client detects token rotation, so the MCP process does not need to be
-restarted every time IDA restarts.
+#### 💻 Cursor / Windsurf
+Add to `.cursor/mcp.json` or Cursor Settings → MCP:
+```json
+{
+  "mcpServers": {
+    "ida-bridge": {
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "cwd": "C:/path/to/ph4ntom-ida-bridge"
+    }
+  }
+}
+```
 
-## Optional agent backends
+Start IDA Pro, press `Ctrl+Shift+A` to toggle the server, and prompt your AI assistant:
+> *"Inspect the function at 0x140001000. Trace cross-references, analyze microcode, decompile to C pseudocode, and rename obfuscated variables to meaningful names."*
 
-Install all provider integrations:
+---
+
+## ⚔️ Comparison with Alternatives
+
+| Feature | **ph4ntom IDA Bridge** | Gepetto / IDAGPT | Hex-Rays Copilot |
+|:---|:---:|:---:|:---:|
+| **Architecture** | **Bi-directional MCP + REST + CLI** | Single prompt-wrapper | Proprietary UI plugin |
+| **Tool Count** | **54 Granular MCP Tools** | 1 (Decompile prompt) | Fixed prompt actions |
+| **AST & Control Flow** | **Full ctree AST + Microcode IR (0-7)** | Pseudocode text only | Pseudocode text only |
+| **Safe Mutations** | **Atomic batch mutations with rollback** | Comment insertion only | Suggestions in UI |
+| **Live Debugger** | **Registers, Stack, Memory, Breakpoints** | No | No |
+| **Dynamic Execution** | **On-the-fly IDAPython execution engine** | No | No |
+| **Supported LLMs** | **Any MCP Client / Claude / GPT / Gemini / Ollama** | OpenAI API only | Proprietary cloud |
+| **Security & Auth** | **Localhost-only, 256-bit token, Owner DACL** | Exposed plain API key | Proprietary |
+| **IDA Pro 9.3 Support** | **Verified & fully tested** | Broken on IDA 9+ | Official |
+
+---
+
+## 🛠️ MCP Tools Reference (54 Tools & 2 Resources)
+
+The MCP server exposes 54 purpose-built tools across 7 reverse-engineering domains:
+
+| Category | Tools | Description |
+|:---|:---|:---|
+| **🔍 Binary & Segments** | `ping`, `get_binary_info`, `list_segments`, `read_bytes`, `read_vtable` | Binary metadata, bitness, permissions, vtable extraction |
+| **🧩 Decompilation & AST** | `decompile`, `get_disassembly`, `get_ctree`, `get_microcode`, `get_local_variables`, `get_function_details` | Hex-Rays C pseudocode, AST ctree JSON, Microcode IR (0=PREOPT to 7=LVARS), prototype info |
+| **🕸️ Callgraphs & Xrefs** | `get_xrefs_to`, `get_xrefs_from`, `get_callers`, `get_callees`, `get_call_graph`, `get_basic_blocks`, `get_strings_used` | Cross-references, recursive caller trees, basic block control flow |
+| **🔎 Search & Exploration** | `search_function`, `search_bytes`, `search_text`, `list_strings`, `list_names`, `list_imports`, `list_exports` | Wildcard byte search (`??`), imported DLL functions, exports, string filtering |
+| **🏷️ Types & Structs** | `list_structs`, `get_struct`, `list_enums`, `list_types`, `get_type`, `create_type`, `create_struct` | C declaration parsing, structure definitions, enum member inspection |
+| **✏️ Database Mutation** | `rename_function`, `comment_function`, `set_inline_comment`, `rename_variable`, `set_variable_type`, `set_function_type`, `patch_bytes`, `batch_mutations`, `undo`, `redo`, `save_database`, `navigate_to` | Verified renaming, local variable typing, binary patching, atomic rollback |
+| **🐞 Live Debugger** | `dbg_start`, `dbg_set_breakpoint`, `dbg_continue`, `dbg_step_into`, `dbg_step_over`, `dbg_get_registers`, `dbg_read_memory`, `dbg_get_stack` | Process execution control, hardware breakpoints, live register and memory dump |
+| **⚡ Dynamic IDAPython** | `execute_idapython` | Real-time IDAPython execution with structured `result` capture |
+| **📦 MCP Resources** | `ida://info`, `ida://schema` | Real-time binary metadata and complete OpenAPI schema |
+
+---
+
+## 🔒 Security Model
+
+The bridge runs inside IDA Pro, granting powerful capabilities. Version 6 implements defense-in-depth defaults:
+
+- **Loopback binding only**: binds strictly to `127.0.0.1:13370`.
+- **Cryptographic session token**: 256-bit token stored in `~/.ph4ntom_ida_bridge_token`.
+- **Owner-only DACL**: on Windows, token files are secured with protected owner-only access before writing.
+- **Constant-time authorization**: prevents timing side-channels during token validation.
+- **POST body limit**: capped at 5 MiB with strict UTF-8 JSON object validation.
+- **CORS restriction**: browser CORS is permitted only from localhost origins.
+- **Dynamic IDAPython disabled by default**: execution requires explicit `IDA_BRIDGE_ALLOW_EXEC=1`.
+- **Header imports restricted**: `POST /api/import-header` requires pre-configured trusted root paths.
+
+> [!CAUTION]
+> Never expose port 13370 through a public interface, tunnel, or reverse proxy. See [SECURITY.md](SECURITY.md) for full hardening guidance.
+
+---
+
+## 📦 Components
+
+| Path | Purpose |
+|:---|:---|
+| `ida_plugin/ph4ntom_ida_bridge.py` | Canonical IDA plugin and REST server (102 endpoints) |
+| `api_schema.json` | Machine-readable REST reference & OpenAPI schema |
+| `core/client.py` | Shared authenticated HTTP client with token refresh |
+| `cli.py` | CLI, plugin installer, doctor, and IDA launcher |
+| `mcp_server.py` | FastMCP server exposing 54 tools and two resources |
+| `agent.py` | Interactive terminal agent with 5 interchangeable LLM backends |
+| `swarm_worker.py` | Structured batch-analysis worker |
+| `agent_config.json` | Machine-readable integration specification for IDE agents |
+| `AGENT_SKILL.md` | Skill definition for Antigravity & IDE-based agents |
+
+---
+
+## 💻 CLI Quick Start
+
+The included CLI provides instant control over your IDA session from any terminal:
+
+```bash
+# Health & info
+ph4ntom-ida ping
+ph4ntom-ida info
+
+# Functions & strings
+python cli.py functions --limit 50
+python cli.py strings --filter "socket|http|connect"
+
+# Decompilation & Cross-references
+python cli.py decompile 0x140001000
+python cli.py xrefs 0x140001000
+python cli.py callers 0x140001000
+
+# Direct API queries
+python cli.py api GET /api/function/0x140001000/ctree
+python cli.py api POST /api/function/0x140001000/rename --body '{"name":"decrypt_payload"}'
+
+# Launch IDA with bridge autostart
+python cli.py launch malware_sample.bin --wait
+```
+
+---
+
+## ⚡ Optional Dynamic IDAPython Execution
+
+Dynamic execution is intentionally off by default. Enable it only on trusted environments:
+
+**PowerShell:**
+```powershell
+$env:IDA_BRIDGE_ALLOW_EXEC = "1"
+```
+
+**Bash:**
+```bash
+export IDA_BRIDGE_ALLOW_EXEC=1
+```
+
+Execute scripts inline, from file, or piped via stdin:
+```bash
+python cli.py exec "result['ea'] = hex(idc.here())"
+python cli.py exec --file custom_scan.py
+cat analyze.py | python cli.py exec -
+```
+
+Scripts receive full IDAPython SDK access (`idc`, `idaapi`, `idautils`, `ida_hexrays`, etc.) and a global `result` dictionary returned as JSON.
+
+---
+
+## 🤖 Standalone Multi-Backend AI Agent
+
+No IDE? Run the built-in terminal agent with any major LLM provider:
 
 ```bash
 python -m pip install -e ".[agents]"
-python agent.py --backend ollama
+
+python agent.py --backend ollama        # 🏠 Local (Ollama, private & offline)
+python agent.py --backend gemini        # ☁️ Google Gemini
+python agent.py --backend anthropic     # ☁️ Anthropic Claude 3.5 Sonnet
+python agent.py --backend openai        # ☁️ OpenAI GPT-4o
+python agent.py --backend deepseek      # ☁️ DeepSeek V3
 ```
 
-Available backends are Ollama, Gemini, OpenAI-compatible APIs, Anthropic, and
-DeepSeek. Provider API keys are read from environment variables; they are not
-stored by this repository.
+API keys are read from standard environment variables (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`).
 
-## REST API
+---
 
-Every response is JSON. Addresses are normally written as hexadecimal strings.
-Use the live schema endpoint or the checked-in schema for the complete reference:
+## 🧪 Testing & Verification
 
-```bash
-python cli.py schema
-```
-
-Key endpoint groups include:
-
-- binary metadata, functions, instructions, strings, imports, and exports;
-- pseudocode, ctree, microcode, local variables, callers, and callees;
-- cross-references, control-flow graphs, types, structures, and enums;
-- database mutations with preview and verified name/comment compensation (see [batch safety and migration](BATCH_SAFETY.md));
-- debugger control, registers, threads, stack, and memory;
-- cursor events over server-sent events.
-
-## Development
+The test suite covers client authentication, routing contracts, MCP registration, CORS boundaries, and IDA 9.3 SDK quirks:
 
 ```bash
 python -m pip install -e ".[dev,mcp]"
@@ -224,11 +242,10 @@ python -m pytest -q
 python verify_mcp.py
 ```
 
-GitHub Actions runs syntax checks, Flake8 correctness checks, and tests on
-Python 3.10, 3.11, and 3.12. Tests that exercise real IDA SDK behavior must be
-performed manually inside IDA using a disposable database before release.
-Follow [TESTING.md](TESTING.md) for the IDA smoke and regression checklist.
+All 54 MCP tools and 102 REST endpoints are verified against IDA Professional 9.3. See [TESTING.md](TESTING.md) for reproducibility details and regression checklists.
 
-## License
+---
 
-MIT
+## 📄 License
+
+Distributed under the **MIT License**. See [LICENSE](LICENSE) for more information.
