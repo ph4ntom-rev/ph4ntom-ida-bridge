@@ -4,11 +4,11 @@
 > Turn IDA Pro into an agentic reverse-engineering powerhouse. Connect Claude Desktop, Cursor, Antigravity, or custom LLM agents via Model Context Protocol (MCP) or high-performance REST API.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
-[![IDA Pro 9.x](https://img.shields.io/badge/IDA_Pro-9.0--9.3-blueviolet?style=flat-square)](https://hex-rays.com)
-[![MCP Compatible](https://img.shields.io/badge/MCP-54_Tools_|_2_Resources-00c853?style=flat-square&logo=anthropic&logoColor=white)](#mcp-tools-reference)
+[![IDA Pro 9.x](https://img.shields.io/badge/IDA_Pro-9.0--9.5-blueviolet?style=flat-square)](https://hex-rays.com)
+[![MCP Compatible](https://img.shields.io/badge/MCP-98_Tools_|_2_Resources-00c853?style=flat-square&logo=anthropic&logoColor=white)](#mcp-tools-reference)
 [![Glama Rating](https://glama.ai/mcp/servers/ph4ntom-rev/ph4ntom-ida-bridge/badges/score.svg)](https://glama.ai/mcp/servers/ph4ntom-rev/ph4ntom-ida-bridge)
-[![REST API](https://img.shields.io/badge/REST_API-102_Endpoints-orange?style=flat-square)](#rest-api)
-[![Release](https://img.shields.io/badge/release-v6.2.0-blue?style=flat-square)](https://github.com/ph4ntom-rev/ph4ntom-ida-bridge/releases)
+[![REST API](https://img.shields.io/badge/REST_API-139_Endpoints-orange?style=flat-square)](#rest-api)
+[![Release](https://img.shields.io/badge/release-v6.3.0-blue?style=flat-square)](https://github.com/ph4ntom-rev/ph4ntom-ida-bridge/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
 [![Security Hardened](https://img.shields.io/badge/security-localhost_only_|_token_auth-red?style=flat-square)](#security-model)
 
@@ -16,25 +16,25 @@
 
 ```
               ┌─────────────────────────────────────────────────────────┐
-              │                       IDA Pro 9.x                       │
-              │         ph4ntom_ida_bridge.py (102 REST Endpoints)      │
-              │         127.0.0.1:13370 (Bearer Token Protected)        │
+              │                     IDA Pro 9.0–9.5                     │
+              │         ph4ntom_ida_bridge.py (139 REST Endpoints)      │
+              │      127.0.0.1:13370..13389 (Bearer Token Protected)    │
               └────────────────────────────┬────────────────────────────┘
                                            │ REST / JSON / SSE
           ┌────────────────────────────────┼───────────────────────────────┐
           ▼                                ▼                               ▼
    ┌───────────────┐               ┌───────────────┐               ┌───────────────┐
    │  MCP Server   │               │   CLI / SDK   │               │   AI Agents   │
-   │  54 Tools     │               │  `ph4ntom-ida`│               │  Multi-LLM    │
+   │  98 Tools     │               │  `ph4ntom-ida`│               │  Multi-LLM    │
    │  Claude       │               │  Automation   │               │  Gemini       │
    │  Cursor       │               │  Headless     │               │  Ollama       │
    │  Antigravity  │               │  Testing      │               │  Claude / GPT │
    └───────────────┘               └───────────────┘               └───────────────┘
 ```
 
-**ph4ntom IDA Bridge** is a localhost-only control layer for **IDA Pro 9.x**. It combines a self-contained IDA plugin, a JSON REST API, a Python client, a CLI, 54 native MCP tools, and optional standalone AI backends.
+**ph4ntom IDA Bridge** is a localhost-only control layer for **IDA Pro 9.x (including 9.5)**. It combines a self-contained IDA plugin, a JSON REST API, a Python client, a CLI, 98 native MCP tools, and optional standalone AI backends.
 
-Version **6.2.0** brings full IDA 9.3 compatibility, atomic database mutations, constant-time token authentication, SSE cursor tracking, and complete test suite coverage.
+Version **6.3.0** brings full **IDA Professional 9.5** support (including `DBG_Hooks`, `inf_is_32bit_exactly`, Hex-Rays Class Model API, decompiler timeouts, and `XREF_EXACT`), **ASLR-aware `module+RVA` addressing**, **multi-instance support** (`13370..13389`), **static analysis pagination/range filters/vtable struct generation**, **forensic evidence capture**, and a **40-tool Dynamic Debugging** suite (hardware read/write watchpoints with range size, conditional breakpoints with `log_and_continue` & thread filtering, explicit debugger states `not_attached`/`running`/`paused`/`breakpoint_hit`, breakpoint export/import across runs, register telescoping & editing, live memory map & search, instruction/function/basic-block tracing, exception handling, thread control, debugger event logs, and opt-in Appcall).
 
 ---
 
@@ -97,30 +97,30 @@ Start IDA Pro, press `Ctrl+Shift+A` to toggle the server, and prompt your AI ass
 | Feature | **ph4ntom IDA Bridge** | Gepetto / IDAGPT | Hex-Rays Copilot |
 |:---|:---:|:---:|:---:|
 | **Architecture** | **Bi-directional MCP + REST + CLI** | Single prompt-wrapper | Proprietary UI plugin |
-| **Tool Count** | **54 Granular MCP Tools** | 1 (Decompile prompt) | Fixed prompt actions |
+| **Tool Count** | **98 Granular MCP Tools** | 1 (Decompile prompt) | Fixed prompt actions |
 | **AST & Control Flow** | **Full ctree AST + Microcode IR (0-7)** | Pseudocode text only | Pseudocode text only |
 | **Safe Mutations** | **Atomic batch mutations with rollback** | Comment insertion only | Suggestions in UI |
-| **Live Debugger** | **Registers, Stack, Memory, Breakpoints** | No | No |
+| **Live Debugger** | **40 Tools: Watchpoints, Conditional BPs, Trace, Appcall, Evidence** | No | No |
 | **Dynamic Execution** | **On-the-fly IDAPython execution engine** | No | No |
 | **Supported LLMs** | **Any MCP Client / Claude / GPT / Gemini / Ollama** | OpenAI API only | Proprietary cloud |
 | **Security & Auth** | **Localhost-only, 256-bit token, Owner DACL** | Exposed plain API key | Proprietary |
-| **IDA Pro 9.3 Support** | **Verified & fully tested** | Broken on IDA 9+ | Official |
+| **IDA Pro 9.5 Support** | **Verified & fully tested (9.0–9.5)** | Broken on IDA 9+ | Official |
 
 ---
 
-## 🛠️ MCP Tools Reference (54 Tools & 2 Resources)
+## 🛠️ MCP Tools Reference (98 Tools & 2 Resources)
 
-The MCP server exposes 54 purpose-built tools across 7 reverse-engineering domains:
+The MCP server exposes 98 purpose-built tools across 8 reverse-engineering domains:
 
 | Category | Tools | Description |
 |:---|:---|:---|
-| **🔍 Binary & Segments** | `ping`, `get_binary_info`, `list_segments`, `read_bytes`, `read_vtable` | Binary metadata, bitness, permissions, vtable extraction |
-| **🧩 Decompilation & AST** | `decompile`, `get_disassembly`, `get_ctree`, `get_microcode`, `get_local_variables`, `get_function_details` | Hex-Rays C pseudocode, AST ctree JSON, Microcode IR (0=PREOPT to 7=LVARS), prototype info |
-| **🕸️ Callgraphs & Xrefs** | `get_xrefs_to`, `get_xrefs_from`, `get_callers`, `get_callees`, `get_call_graph`, `get_basic_blocks`, `get_strings_used` | Cross-references, recursive caller trees, basic block control flow |
-| **🔎 Search & Exploration** | `search_function`, `search_bytes`, `search_text`, `list_strings`, `list_names`, `list_imports`, `list_exports` | Wildcard byte search (`??`), imported DLL functions, exports, string filtering |
+| **🔍 Binary, Vtables & Multi-Instance** | `ping`, `get_binary_info`, `list_segments`, `read_bytes`, `read_vtable`, `create_vtable_struct`, `list_ida_instances`, `select_ida_instance` | Binary metadata, hashes, `module+RVA`, vtable extraction & C struct generation, multi-instance switching |
+| **🧩 Decompilation, AST & IDA 9.5 Classes** | `decompile`, `decompile_batch`, `get_disassembly`, `get_disasm_range`, `get_ctree`, `get_microcode`, `get_local_variables`, `get_function_details`, `list_classes`, `get_class`, `get_decompiler_timeout`, `set_decompiler_timeout` | Hex-Rays C pseudocode, batch decompile, arbitrary range disasm, AST ctree JSON, Microcode IR (0–7), IDA 9.5 Class Model |
+| **🕸️ Callgraphs & Xrefs** | `get_xrefs_to`, `get_xrefs_from`, `get_callers`, `get_callees`, `get_call_graph`, `get_basic_blocks`, `get_strings_used` | Filtered & paginated cross-references (`XREF_EXACT`), caller trees, clean string literals without machine code |
+| **🔎 Search & Paginated Exploration** | `list_functions`, `search_function`, `search_bytes`, `search_text`, `list_strings`, `list_names`, `list_imports`, `list_exports` | Full pagination (`offset`/`limit`) and `[start_ea, end_ea)` range filters beyond 2000/1000 limits |
 | **🏷️ Types & Structs** | `list_structs`, `get_struct`, `list_enums`, `list_types`, `get_type`, `create_type`, `create_struct` | C declaration parsing, structure definitions, enum member inspection |
 | **✏️ Database Mutation** | `rename_function`, `comment_function`, `set_inline_comment`, `rename_variable`, `set_variable_type`, `set_function_type`, `patch_bytes`, `batch_mutations`, `undo`, `redo`, `save_database`, `navigate_to` | Verified renaming, local variable typing, binary patching, atomic rollback |
-| **🐞 Live Debugger** | `dbg_start`, `dbg_set_breakpoint`, `dbg_continue`, `dbg_step_into`, `dbg_step_over`, `dbg_get_registers`, `dbg_read_memory`, `dbg_get_stack` | Process execution control, hardware breakpoints, live register and memory dump |
+| **🐞 Live Debugger & Evidence** | `dbg_get_status`, `dbg_load_debugger`, `dbg_start`, `dbg_exit`, `dbg_list_processes`, `dbg_attach`, `dbg_detach`, `dbg_pause`, `dbg_set_breakpoint`, `dbg_set_watchpoint`, `dbg_list_breakpoints`, `dbg_delete_breakpoint`, `dbg_toggle_breakpoint`, `dbg_update_breakpoint`, `dbg_export_breakpoints`, `dbg_import_breakpoints`, `capture_evidence`, `dbg_continue`, `dbg_step_into`, `dbg_step_over`, `dbg_step_out`, `dbg_run_to`, `dbg_wait_event`, `dbg_get_registers`, `dbg_set_register`, `dbg_read_memory`, `dbg_write_memory`, `dbg_get_memory_map`, `dbg_refresh_memory`, `dbg_search_memory`, `dbg_list_modules`, `dbg_list_threads`, `dbg_thread_action`, `dbg_get_stack`, `dbg_configure_trace`, `dbg_get_trace`, `dbg_clear_trace`, `dbg_list_exceptions`, `dbg_configure_exception`, `dbg_get_events`, `dbg_clear_events`, `dbg_send_command`, `dbg_appcall` | Explicit debugger states, read/write/rw hardware watchpoints, conditional `log_and_continue` breakpoints with thread filtering, `module+RVA` ASLR persistence, and JSON evidence capture |
 | **⚡ Dynamic IDAPython** | `execute_idapython` | Real-time IDAPython execution with structured `result` capture |
 | **📦 MCP Resources** | `ida://info`, `ida://schema` | Real-time binary metadata and complete OpenAPI schema |
 
@@ -148,11 +148,11 @@ The bridge runs inside IDA Pro, granting powerful capabilities. Version 6 implem
 
 | Path | Purpose |
 |:---|:---|
-| `ida_plugin/ph4ntom_ida_bridge.py` | Canonical IDA plugin and REST server (102 endpoints) |
+| `ida_plugin/ph4ntom_ida_bridge.py` | Canonical IDA plugin and REST server (139 endpoints) |
 | `api_schema.json` | Machine-readable REST reference & OpenAPI schema |
-| `core/client.py` | Shared authenticated HTTP client with token refresh |
-| `cli.py` | CLI, plugin installer, doctor, and IDA launcher |
-| `mcp_server.py` | FastMCP server exposing 54 tools and two resources |
+| `core/client.py` | Shared authenticated HTTP client with token refresh & multi-instance discovery |
+| `cli.py` | CLI, plugin installer, doctor, evidence dumper, and IDA launcher |
+| `mcp_server.py` | FastMCP server exposing 98 tools and two resources |
 | `agent.py` | Interactive terminal agent with 5 interchangeable LLM backends |
 | `swarm_worker.py` | Structured batch-analysis worker |
 | `agent_config.json` | Machine-readable integration specification for IDE agents |
@@ -243,7 +243,7 @@ python -m pytest -q
 python verify_mcp.py
 ```
 
-All 54 MCP tools and 102 REST endpoints are verified against IDA Professional 9.3. See [TESTING.md](TESTING.md) for reproducibility details and regression checklists.
+All 98 MCP tools and 139 REST endpoints are verified against IDA Professional 9.3–9.5. See [TESTING.md](TESTING.md) for reproducibility details and regression checklists.
 
 ---
 

@@ -12,26 +12,53 @@ def test_mcp_registers_expected_tools_and_resources():
     resources = asyncio.run(mcp.list_resources())
     names = {tool.name for tool in tools}
 
-    assert len(tools) == 54
+    assert len(tools) == 98
     assert len(resources) == 2
     assert {
         "ping",
         "decompile",
+        "decompile_batch",
+        "get_disasm_range",
+        "create_vtable_struct",
         "get_ctree",
         "get_microcode",
         "rename_function",
         "execute_idapython",
         "save_database",
+        "list_classes",
+        "get_class",
+        "get_decompiler_timeout",
+        "set_decompiler_timeout",
+        "dbg_get_status",
+        "dbg_load_debugger",
+        "dbg_set_watchpoint",
+        "dbg_delete_breakpoint",
+        "dbg_toggle_breakpoint",
+        "dbg_update_breakpoint",
+        "dbg_export_breakpoints",
+        "dbg_import_breakpoints",
+        "capture_evidence",
+        "list_ida_instances",
+        "select_ida_instance",
+        "dbg_get_memory_map",
+        "dbg_search_memory",
+        "dbg_list_modules",
+        "dbg_configure_trace",
+        "dbg_get_trace",
+        "dbg_get_events",
+        "dbg_appcall",
     }.issubset(names)
 
 
 def test_mcp_annotations_distinguish_reads_and_writes():
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
     assert all(tool.annotations is not None for tool in tools.values())
-    assert tools['decompile'].annotations.readOnlyHint is True
-    assert tools['rename_function'].annotations.readOnlyHint is False
-    assert tools['rename_function'].annotations.destructiveHint is True
-    assert tools['execute_idapython'].annotations.openWorldHint is True
+    assert tools['decompile'].annotations.read_only_hint is True
+    assert tools['rename_function'].annotations.read_only_hint is False
+    assert tools['rename_function'].annotations.destructive_hint is True
+    assert tools['execute_idapython'].annotations.open_world_hint is True
+    assert tools['dbg_get_status'].annotations.read_only_hint is True
+    assert tools['dbg_set_watchpoint'].annotations.read_only_hint is False
 
 
 def test_mcp_protocol_marks_bridge_failures_as_errors(monkeypatch):

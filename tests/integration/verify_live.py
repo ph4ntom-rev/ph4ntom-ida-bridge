@@ -22,11 +22,11 @@ async def verify(args):
             assert not result.is_error
             return json.loads(result.content[0].text)
         tools = await client.list_tools()
-        assert len(tools) == 54 and all(t.annotations is not None for t in tools)
+        assert len(tools) == 98 and all(t.annotations is not None for t in tools)
         assert len(await client.list_resources()) == 2
-        passed('installed stdio MCP registers 54 annotated tools and 2 resources')
+        passed('installed stdio MCP registers 98 annotated tools and 2 resources')
         ping = await call('ping')
-        assert ping['version'] == '6.2.0' and ping['auth_enabled'] and not ping['dynamic_exec_enabled']
+        assert ping['version'] == '6.3.0' and ping['auth_enabled'] and not ping['dynamic_exec_enabled']
         report['bridge'] = ping
         passed('authenticated MCP discovery reaches expected installed plugin version')
         info = await call('get_binary_info')

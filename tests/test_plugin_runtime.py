@@ -79,8 +79,8 @@ def test_plugin_imports_with_stubbed_ida_and_writes_secure_token(monkeypatch, tm
     token = token_file.read_text(encoding="utf-8")
     assert token == plugin.AUTH_TOKEN
     assert len(token) == 64
-    assert len(plugin.GET_ROUTES) == 41
-    assert len(plugin.POST_ROUTES) == 44
+    assert len(plugin.GET_ROUTES) == 55
+    assert len(plugin.POST_ROUTES) == 67
 
 
 def test_http_security_defaults(monkeypatch, tmp_path):
@@ -201,3 +201,79 @@ def test_every_documented_endpoint_is_routable(monkeypatch, tmp_path):
         thread.join(timeout=2)
 
     assert failures == []
+
+
+def test_ida_95_dbg_hooks_and_exec_guards(monkeypatch, tmp_path):
+    plugin, _ = _load_plugin(monkeypatch, tmp_path)
+    assert plugin.dbg_hooks is not None
+    plugin.dbg_hooks.dbg_bpt(1234, 0x140001000)
+    plugin.dbg_hooks.dbg_exception(42, 1234, 0x140001010, 0xC0000005, 1, 0x0, "Access violation")
+    events_res = plugin.dbg_get_event_log(limit=10)
+    assert events_res["count"] == 2
+    assert events_res["events"][0]["event"] == "breakpoint_hit"
+    assert events_res["events"][1]["event"] == "exception"
+
+    server = plugin.BridgeHTTPServer(("127.0.0.1", 0), plugin.BridgeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    headers = {"Authorization": "Bearer " + plugin.AUTH_TOKEN}
+    try:
+        cmd_res = requests.post(base_url + "/api/dbg/cmd", headers=headers, json={"cmd": "!peb"}, timeout=2)
+        appcall_res = requests.post(base_url + "/api/dbg/appcall", headers=headers, json={"ea": "0x1000"}, timeout=2)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert cmd_res.status_code == 403
+    assert appcall_res.status_code == 403
+
+
+def test_module_rva_and_breakpoint_policies(monkeypatch, tmp_path):
+    plugin, _ = _load_plugin(monkeypatch, tmp_path)
+
+    class _FakeMod:
+        name = "C:\\bin\\networksystem.dll"
+        base = 0x7FFB10000000
+        size = 0x500000
+
+    plugin.ida_dbg.is_debugger_on = lambda: True
+    plugin.ida_dbg.get_process_state = lambda: -1
+    plugin.ida_dbg.get_modules = lambda: [_FakeMod()]
+    continued = []
+    plugin.ida_dbg.continue_process = lambda: continued.append(True) or True
+    plugin.ida_nalt.get_imagebase = lambda: 0x180000000
+    plugin.ida_nalt.get_root_filename = lambda: "networksystem.dll"
+
+    resolved = plugin.parse_ea("networksystem.dll+0xC3EA7")
+    assert resolved == 0x7FFB100C3EA7
+    assert plugin._format_module_rva_inner(resolved) == "networksystem.dll+0xc3ea7"
+
+    # Configure a breakpoint policy with tid filter and log_and_continue
+    plugin._bp_policies[resolved] = {
+        "tid": 9999,
+        "action": "log_and_continue",
+        "auto_continue": True,
+        "log_regs": ["RAX", "RDX"],
+        "hit_count": 0,
+        "module_rva": "networksystem.dll+0xc3ea7",
+    }
+    plugin._dbg_events.clear()
+
+    # Hit on wrong thread (1111 != 9999) -> should auto-continue without recording hit
+    plugin.dbg_hooks.dbg_bpt(1111, resolved)
+    assert plugin._bp_policies[resolved]["hit_count"] == 0
+    assert len(continued) == 1
+
+    # Hit on matching thread (9999) -> increments hit_count, logs event, and auto-continues
+    plugin.dbg_hooks.dbg_bpt(9999, resolved)
+    assert plugin._bp_policies[resolved]["hit_count"] == 1
+    assert len(continued) == 2
+    events = plugin.dbg_get_event_log(limit=10)["events"]
+    assert events[-1]["event"] == "breakpoint_hit"
+    assert events[-1]["hit_count"] == 1
+    assert events[-1]["auto_continued"] is True
+    assert events[-1]["module_rva"] == "networksystem.dll+0xc3ea7"
+
+

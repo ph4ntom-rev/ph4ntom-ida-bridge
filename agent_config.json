@@ -1,7 +1,7 @@
 {
   "name": "ph4ntom IDA Bridge",
-  "version": "6.2.0",
-  "description": "AI agent interface to IDA Pro reverse engineering environment",
+  "version": "6.3.0",
+  "description": "AI agent interface to IDA Pro 9.5+ reverse engineering and dynamic debugging environment",
   "bridge_url": "http://127.0.0.1:13370",
   "auth": {
     "type": "bearer",
@@ -17,7 +17,7 @@
       "usage": "python cli.py <command> [args]"
     },
     "mcp_server": {
-      "description": "For MCP-compatible clients (Claude Desktop, Cursor, Cline). Exposes 54 native MCP tools.",
+      "description": "For MCP-compatible clients (Claude Desktop, Cursor, Cline, Antigravity). Exposes 90 native MCP tools.",
       "entry": "mcp_server.py",
       "config_claude": {"command": "python", "args": ["mcp_server.py"]},
       "config_cursor": {"command": "python", "args": ["mcp_server.py"]}

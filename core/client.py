@@ -92,9 +92,16 @@ class BridgeClient:
         if self._explicit_token_file:
             candidates.append(Path(self._explicit_token_file).expanduser())
         else:
+            parsed = urlsplit(self.base_url)
+            port = parsed.port or 13370
+            if port != 13370:
+                candidates.extend((
+                    Path.home() / f".ph4ntom_ida_bridge_token_{port}",
+                    Path(tempfile.gettempdir()) / f".ph4ntom_ida_bridge_token_{port}",
+                ))
             candidates.extend((
-            Path.home() / ".ph4ntom_ida_bridge_token",
-            Path(tempfile.gettempdir()) / ".ph4ntom_ida_bridge_token",
+                Path.home() / ".ph4ntom_ida_bridge_token",
+                Path(tempfile.gettempdir()) / ".ph4ntom_ida_bridge_token",
             ))
         for candidate in candidates:
             key = os.path.normcase(os.path.abspath(str(candidate)))
@@ -243,6 +250,92 @@ class BridgeClient:
             f"/api/function/{self.path_component(ea)}/rename",
             {"name": name},
         )
+
+    def classes(self) -> Dict[str, Any]:
+        return self.get("/api/classes")
+
+    def class_details(self, name: str) -> Dict[str, Any]:
+        return self.get(f"/api/class/{self.path_component(name)}")
+
+    def dbg_status(self) -> Dict[str, Any]:
+        return self.get("/api/dbg/status")
+
+    def dbg_regs(self, tid: Optional[int] = None, include_all: bool = False) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if tid is not None:
+            params["tid"] = tid
+        if include_all:
+            params["all"] = "1"
+        return self.get("/api/dbg/regs", **params)
+
+    def dbg_breakpoints(self) -> Dict[str, Any]:
+        return self.get("/api/dbg/breakpoints")
+
+    def dbg_modules(self) -> Dict[str, Any]:
+        return self.get("/api/dbg/modules")
+
+    def dbg_memory_map(self) -> Dict[str, Any]:
+        return self.get("/api/dbg/memory-map")
+
+    def dbg_threads(self) -> Dict[str, Any]:
+        return self.get("/api/dbg/threads")
+
+    def dbg_stack(self) -> Dict[str, Any]:
+        return self.get("/api/dbg/stack")
+
+    def dbg_events(self, limit: int = 50) -> Dict[str, Any]:
+        return self.get("/api/dbg/events", limit=limit)
+
+    def list_instances(self) -> Dict[str, Any]:
+        """Return active IDA Bridge instances from ~/.ph4ntom_ida_instances.json or /api/instances."""
+        import json as _json
+        reg_path = Path.home() / ".ph4ntom_ida_instances.json"
+        instances = []
+        if reg_path.is_file():
+            try:
+                raw = _json.loads(reg_path.read_text(encoding="utf-8")) or {}
+                for _, item in sorted(raw.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
+                    if isinstance(item, dict):
+                        instances.append(item)
+            except Exception:
+                pass
+        if not instances:
+            res = self.get("/api/instances")
+            if not res.get("error"):
+                return res
+        return {"instances": instances, "active_url": self.base_url, "count": len(instances)}
+
+    def select_instance(self, target: Any) -> Dict[str, Any]:
+        """Switch this client to target IDA instance by port (e.g. 13371) or binary name (e.g. 'networksystem.dll')."""
+        target_str = str(target).strip()
+        instances = self.list_instances().get("instances", [])
+        chosen = None
+        if target_str.isdigit():
+            port = int(target_str)
+            for item in instances:
+                if item.get("port") == port:
+                    chosen = item
+                    break
+            if chosen is None:
+                chosen = {"port": port, "url": f"http://127.0.0.1:{port}"}
+        else:
+            t_low = target_str.lower()
+            for item in instances:
+                fn = (item.get("filename") or "").lower()
+                fp = (item.get("filepath") or "").lower()
+                if t_low == fn or t_low in fn or t_low in fp:
+                    chosen = item
+                    break
+        if chosen is None:
+            return {"success": False, "error": f"No active IDA instance matching '{target_str}'", "instances": instances}
+        with self._request_lock:
+            self.base_url = self._normalize_url(chosen["url"])
+            if chosen.get("token_path"):
+                self._explicit_token_file = chosen["token_path"]
+            else:
+                self._explicit_token_file = None
+            self._load_token(self.session)
+        return {"success": True, "selected": chosen, "active_url": self.base_url}
 
     def close(self) -> None:
         self.session.close()

@@ -53,7 +53,11 @@ except ImportError:
 
 HOST = "127.0.0.1"
 PORT = 13370
-BRIDGE_VERSION = "6.2.0"
+BRIDGE_VERSION = "6.3.0"
+try:
+    IDA_VERSION = ida_kernwin.get_kernel_version() if hasattr(ida_kernwin, 'get_kernel_version') else "unknown"
+except Exception:
+    IDA_VERSION = "unknown"
 MAX_FUNCTIONS = 5000
 MAX_STRINGS = 2000
 MAX_BODY_SIZE = 5 * 1024 * 1024
@@ -99,16 +103,17 @@ def _env_flag(name, default=False):
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _write_secure_token(token):
+def _write_secure_token(token, port=PORT):
     """Write the session token atomically with owner-only permissions."""
     configured = os.environ.get("IDA_BRIDGE_TOKEN_FILE")
     candidates = []
     if configured:
         candidates.append(os.path.abspath(os.path.expanduser(configured)))
     if not configured:
+        suffix = f"_{port}" if (port and port not in (PORT, 0)) else ""
         candidates.extend([
-        os.path.join(os.path.expanduser("~"), ".ph4ntom_ida_bridge_token"),
-        os.path.join(tempfile.gettempdir(), ".ph4ntom_ida_bridge_token"),
+            os.path.join(os.path.expanduser("~"), f".ph4ntom_ida_bridge_token{suffix}"),
+            os.path.join(tempfile.gettempdir(), f".ph4ntom_ida_bridge_token{suffix}"),
         ])
 
     last_error = None
@@ -253,24 +258,58 @@ def get_info():
     """Get basic information about the loaded binary."""
     def _inner():
         import ida_ida
-        # IDA 9.x compatible — use ida_ida / idc.get_inf_attr
+        # IDA 9.5+ compatible — inf_is_32bit() was replaced by inf_is_32bit_exactly() / inf_is_16bit()
         procname = ida_ida.inf_get_procname() if hasattr(ida_ida, 'inf_get_procname') else "unknown"
         is_64 = ida_ida.inf_is_64bit() if hasattr(ida_ida, 'inf_is_64bit') else False
-        is_32 = ida_ida.inf_is_32bit() if hasattr(ida_ida, 'inf_is_32bit') else True
+        if hasattr(ida_ida, 'inf_is_32bit_exactly'):
+            is_32 = ida_ida.inf_is_32bit_exactly()
+        elif hasattr(ida_ida, 'inf_is_32bit'):
+            is_32 = ida_ida.inf_is_32bit()
+        elif hasattr(ida_ida, 'inf_is_16bit'):
+            is_32 = not is_64 and not ida_ida.inf_is_16bit()
+        else:
+            is_32 = not is_64
         min_ea = ida_ida.inf_get_min_ea() if hasattr(ida_ida, 'inf_get_min_ea') else 0
         max_ea = ida_ida.inf_get_max_ea() if hasattr(ida_ida, 'inf_get_max_ea') else 0
         start_ea = ida_ida.inf_get_start_ea() if hasattr(ida_ida, 'inf_get_start_ea') else 0
+        ida_ver = ida_kernwin.get_kernel_version() if hasattr(ida_kernwin, 'get_kernel_version') else "unknown"
+        dbg_on = False
+        try:
+            import ida_dbg
+            dbg_on = bool(ida_dbg.is_debugger_on()) if hasattr(ida_dbg, 'is_debugger_on') else False
+        except Exception:
+            pass
+        imagebase = ida_nalt.get_imagebase() if hasattr(ida_nalt, 'get_imagebase') else min_ea
+        md5_hex, sha256_hex, crc32_val = None, None, None
+        try:
+            raw_md5 = ida_nalt.retrieve_input_file_md5() if hasattr(ida_nalt, 'retrieve_input_file_md5') else None
+            if isinstance(raw_md5, (bytes, bytearray)):
+                md5_hex = raw_md5.hex()
+            raw_sha = ida_nalt.retrieve_input_file_sha256() if hasattr(ida_nalt, 'retrieve_input_file_sha256') else None
+            if isinstance(raw_sha, (bytes, bytearray)):
+                sha256_hex = raw_sha.hex()
+            if hasattr(ida_nalt, 'retrieve_input_file_crc32'):
+                crc32_val = hex(ida_nalt.retrieve_input_file_crc32() & 0xFFFFFFFF)
+        except Exception:
+            pass
         return {
-            "filename": ida_nalt.get_root_filename(),
-            "filepath": ida_nalt.get_input_file_path(),
+            "filename": ida_nalt.get_root_filename() if hasattr(ida_nalt, 'get_root_filename') else None,
+            "filepath": ida_nalt.get_input_file_path() if hasattr(ida_nalt, 'get_input_file_path') else None,
             "processor": procname,
             "bitness": 64 if is_64 else (32 if is_32 else 16),
             "file_type": ida_loader_type(),
+            "imagebase": hex(imagebase) if isinstance(imagebase, int) and imagebase != ida_idaapi.BADADDR else hex(min_ea),
             "entry_point": hex(start_ea),
             "min_ea": hex(min_ea),
             "max_ea": hex(max_ea),
+            "md5": md5_hex,
+            "sha256": sha256_hex,
+            "crc32": crc32_val,
             "hexrays_available": HAS_HEXRAYS,
-            "analysis_done": ida_auto.auto_is_ok(),
+            "analysis_done": ida_auto.auto_is_ok() if hasattr(ida_auto, 'auto_is_ok') else True,
+            "ida_version": ida_ver,
+            "bridge_version": BRIDGE_VERSION,
+            "debugger_on": dbg_on,
         }
     return safe_read(_inner)
 
@@ -283,18 +322,37 @@ def ida_loader_type():
     except:
         return "unknown"
 
-def get_functions():
-    """List all functions with address, name, and size."""
+def get_functions(filter_str=None, start_ea=None, end_ea=None):
+    """List functions with address, name, size, module_rva, and optional name/range filters."""
     def _inner():
         funcs = []
         count = 0
+        pat = None
+        if filter_str:
+            try:
+                pat = re.compile(filter_str, re.IGNORECASE)
+            except re.error:
+                pat = None
+        filt_lower = filter_str.lower() if filter_str else None
         for ea in idautils.Functions():
+            if start_ea is not None and ea < start_ea:
+                continue
+            if end_ea is not None and ea >= end_ea:
+                continue
+            name = ida_funcs.get_func_name(ea) or ""
+            if filter_str:
+                if pat is not None:
+                    if not pat.search(name):
+                        continue
+                elif filt_lower not in name.lower():
+                    continue
             if count >= MAX_FUNCTIONS:
                 break
             f = ida_funcs.get_func(ea)
             funcs.append({
                 "ea": hex(ea),
-                "name": ida_funcs.get_func_name(ea),
+                "module_rva": _format_module_rva_inner(ea),
+                "name": name,
                 "size": f.size() if f else 0,
             })
             count += 1
@@ -334,8 +392,45 @@ def get_pseudocode(ea):
         }
     return safe_read(_inner)
 
-def get_disasm(ea):
-    """Get disassembly listing for function at ea."""
+def _format_module_rva_inner(ea):
+    """Format an effective address as 'module+0xRVA' (must run inside safe_read/safe_write)."""
+    if ea is None or ea == ida_idaapi.BADADDR:
+        return None
+    try:
+        import ida_dbg
+        if hasattr(ida_dbg, 'is_debugger_on') and ida_dbg.is_debugger_on():
+            if hasattr(ida_dbg, 'get_modules'):
+                for m in ida_dbg.get_modules():
+                    mbase = getattr(m, 'base', ida_idaapi.BADADDR)
+                    msize = getattr(m, 'size', 0)
+                    if mbase != ida_idaapi.BADADDR and mbase <= ea < (mbase + msize if msize else ida_idaapi.BADADDR):
+                        mod_base_name = os.path.basename(getattr(m, 'name', '') or "") or "module"
+                        return f"{mod_base_name}+{hex(ea - mbase)}"
+            import ida_idd
+            if hasattr(ida_idd, 'modinfo_t') and hasattr(ida_dbg, 'get_module_info'):
+                mi = ida_idd.modinfo_t()
+                if ida_dbg.get_module_info(ea, mi) and mi.base != ida_idaapi.BADADDR and ea >= mi.base:
+                    mod_base_name = os.path.basename(mi.name) if mi.name else "module"
+                    return f"{mod_base_name}+{hex(ea - mi.base)}"
+    except Exception:
+        pass
+    try:
+        root_name = ida_nalt.get_root_filename() if hasattr(ida_nalt, 'get_root_filename') else None
+        img_base = ida_nalt.get_imagebase() if hasattr(ida_nalt, 'get_imagebase') else 0
+        if img_base in (0, ida_idaapi.BADADDR):
+            import ida_ida
+            img_base = ida_ida.inf_get_min_ea() if hasattr(ida_ida, 'inf_get_min_ea') else 0
+        if root_name and img_base != ida_idaapi.BADADDR and ea >= img_base:
+            return f"{root_name}+{hex(ea - img_base)}"
+    except Exception:
+        pass
+    return hex(ea)
+
+
+def get_disasm(ea, end_ea=None, count=None):
+    """Get disassembly listing for function at ea, or an address range if end_ea/count is given."""
+    if end_ea is not None or count is not None:
+        return get_disasm_range(ea, end_ea=end_ea, count=count or 200)
     def _inner():
         f = ida_funcs.get_func(ea)
         if not f:
@@ -344,75 +439,185 @@ def get_disasm(ea):
         current = f.start_ea
         while current < f.end_ea and current != ida_idaapi.BADADDR:
             disasm = idc.generate_disasm_line(current, 0)
-            lines.append({"ea": hex(current), "text": disasm})
+            lines.append({"ea": hex(current), "module_rva": _format_module_rva_inner(current), "text": disasm})
             current = idc.next_head(current, f.end_ea)
-        return {"ea": hex(ea), "name": ida_funcs.get_func_name(ea), "disasm": lines}
+        return {
+            "ea": hex(ea),
+            "module_rva": _format_module_rva_inner(ea),
+            "name": ida_funcs.get_func_name(ea),
+            "disasm": lines,
+            "count": len(lines),
+        }
     return safe_read(_inner)
 
-def get_xrefs_to(ea):
-    """Get all cross-references TO this address."""
+
+def get_disasm_range(start_ea, end_ea=None, count=100):
+    """Disassemble an arbitrary address range [start_ea, end_ea) or up to `count` instructions."""
+    count = bounded_int(count if count is not None else 100, 'count', 1, 5000)
+    def _inner():
+        import ida_ida
+        max_limit = end_ea if end_ea is not None else (ida_ida.inf_get_max_ea() if hasattr(ida_ida, 'inf_get_max_ea') else ida_idaapi.BADADDR)
+        lines = []
+        current = start_ea
+        steps = 0
+        while current < max_limit and current != ida_idaapi.BADADDR and steps < count:
+            disasm = idc.generate_disasm_line(current, 0)
+            item_size = max(1, ida_bytes.get_item_size(current) if hasattr(ida_bytes, 'get_item_size') else 1)
+            raw = ida_bytes.get_bytes(current, min(item_size, 16))
+            f = ida_funcs.get_func(current)
+            lines.append({
+                "ea": hex(current),
+                "module_rva": _format_module_rva_inner(current),
+                "bytes": raw.hex().upper() if raw else "",
+                "text": disasm,
+                "func": ida_funcs.get_func_name(f.start_ea) if f else None,
+            })
+            steps += 1
+            nxt = idc.next_head(current, max_limit)
+            if nxt == ida_idaapi.BADADDR or nxt <= current:
+                current += item_size
+            else:
+                current = nxt
+        return {
+            "start_ea": hex(start_ea),
+            "start_module_rva": _format_module_rva_inner(start_ea),
+            "end_ea": hex(end_ea) if end_ea is not None else (lines[-1]["ea"] if lines else hex(start_ea)),
+            "disasm": lines,
+            "count": len(lines),
+        }
+    return safe_read(_inner)
+
+
+def get_xrefs_to(ea, exact=False, filter_str=None, start_ea=None, end_ea=None, xref_type=None):
+    """Get all cross-references TO this address (supports IDA 9.5 XREF_EXACT and filtering)."""
     def _inner():
         refs = []
-        for xref in idautils.XrefsTo(ea):
+        flags = 0
+        if exact:
+            try:
+                import ida_xref
+                flags = getattr(ida_xref, 'XREF_EXACT', 0)
+            except ImportError:
+                flags = 0
+        pattern = re.compile(filter_str, re.IGNORECASE) if filter_str else None
+        type_filt = (xref_type or "").strip().lower()
+        iterator = idautils.XrefsTo(ea, flags) if flags else idautils.XrefsTo(ea)
+        for xref in iterator:
+            if start_ea is not None and xref.frm < start_ea:
+                continue
+            if end_ea is not None and xref.frm >= end_ea:
+                continue
+            t_str = _xref_type_str(xref.type)
+            if type_filt and type_filt not in t_str.lower():
+                continue
             func = ida_funcs.get_func(xref.frm)
+            fname = ida_funcs.get_func_name(func.start_ea) if func else (ida_name.get_name(xref.frm) or None)
+            if pattern and not pattern.search(fname or ""):
+                continue
             refs.append({
                 "from_ea": hex(xref.frm),
-                "from_func": ida_funcs.get_func_name(func.start_ea) if func else None,
+                "from_module_rva": _format_module_rva_inner(xref.frm),
+                "to_ea": hex(getattr(xref, 'to', ea)),
+                "from_func": fname,
                 "from_func_ea": hex(func.start_ea) if func else None,
-                "type": _xref_type_str(xref.type),
+                "type": t_str,
             })
-        return {"ea": hex(ea), "xrefs_to": refs, "count": len(refs)}
+        return {
+            "ea": hex(ea),
+            "module_rva": _format_module_rva_inner(ea),
+            "xrefs_to": refs,
+            "count": len(refs),
+            "exact": bool(exact),
+        }
     return safe_read(_inner)
 
-def get_xrefs_from(ea):
-    """Get all cross-references FROM this function."""
+
+def get_xrefs_from(ea, filter_str=None, start_ea=None, end_ea=None, xref_type=None):
+    """Get all cross-references FROM this function or address."""
     def _inner():
         f = ida_funcs.get_func(ea)
         if not f:
             return {"error": f"No function at {hex(ea)}"}
         refs = []
         seen = set()
-        current = f.start_ea
-        while current < f.end_ea and current != ida_idaapi.BADADDR:
+        pattern = re.compile(filter_str, re.IGNORECASE) if filter_str else None
+        type_filt = (xref_type or "").strip().lower()
+        current = max(f.start_ea, start_ea) if start_ea is not None else f.start_ea
+        limit_ea = min(f.end_ea, end_ea) if end_ea is not None else f.end_ea
+        while current < limit_ea and current != ida_idaapi.BADADDR:
             for xref in idautils.XrefsFrom(current):
+                if xref.type == 21:  # skip ordinary instruction flow
+                    continue
+                t_str = _xref_type_str(xref.type)
+                if type_filt and type_filt not in t_str.lower():
+                    continue
                 target_func = ida_funcs.get_func(xref.to)
+                tname = ida_funcs.get_func_name(target_func.start_ea) if target_func else ida_name.get_name(xref.to)
+                if pattern and not pattern.search(tname or ""):
+                    continue
                 key = xref.to
                 if key not in seen:
                     seen.add(key)
                     refs.append({
+                        "from_ea": hex(current),
                         "to_ea": hex(xref.to),
-                        "to_func": ida_funcs.get_func_name(target_func.start_ea) if target_func else ida_name.get_name(xref.to),
+                        "to_module_rva": _format_module_rva_inner(xref.to),
+                        "to_func": tname,
                         "to_func_ea": hex(target_func.start_ea) if target_func else None,
-                        "type": _xref_type_str(xref.type),
+                        "type": t_str,
                     })
-            current = idc.next_head(current, f.end_ea)
-        return {"ea": hex(ea), "xrefs_from": refs, "count": len(refs)}
+            current = idc.next_head(current, limit_ea)
+        return {
+            "ea": hex(ea),
+            "module_rva": _format_module_rva_inner(ea),
+            "xrefs_from": refs,
+            "count": len(refs),
+        }
     return safe_read(_inner)
 
-def get_strings(filter_regex=None):
-    """Get all strings in the binary, optionally filtered by regex (compiled for performance)."""
+
+def get_strings(filter_regex=None, offset=0, limit=MAX_STRINGS, start_ea=None, end_ea=None):
+    """Get strings in the binary with regex/range filtering and full pagination beyond 2000."""
+    offset = bounded_int(offset, 'offset', 0, 2 ** 31 - 1)
+    limit = bounded_int(limit, 'limit', 1, 10000)
     def _inner():
         import ida_strlist
         ida_strlist.build_strlist()
         sl = ida_strlist.string_info_t()
         result = []
-        count = 0
+        matched_total = 0
         pattern = re.compile(filter_regex, re.IGNORECASE) if filter_regex else None
-        for i in range(ida_strlist.get_strlist_qty()):
-            if count >= MAX_STRINGS:
-                break
+        qty = ida_strlist.get_strlist_qty()
+        for i in range(qty):
             if ida_strlist.get_strlist_item(sl, i):
+                if start_ea is not None and sl.ea < start_ea:
+                    continue
+                if end_ea is not None and sl.ea >= end_ea:
+                    continue
                 s = ida_bytes.get_strlit_contents(sl.ea, sl.length, getattr(sl, 'strtype', getattr(sl, 'type', 0)))
                 if s is not None:
                     try:
                         text = s.decode("utf-8", errors="replace")
-                    except:
+                    except Exception:
                         text = str(s)
                     if pattern and not pattern.search(text):
                         continue
-                    result.append({"ea": hex(sl.ea), "value": text, "length": sl.length})
-                    count += 1
-        return {"strings": result, "total": count, "truncated": count >= MAX_STRINGS}
+                    if offset <= matched_total < offset + limit:
+                        result.append({
+                            "ea": hex(sl.ea),
+                            "module_rva": _format_module_rva_inner(sl.ea),
+                            "value": text,
+                            "length": sl.length,
+                        })
+                    matched_total += 1
+        return {
+            "strings": result,
+            "offset": offset,
+            "limit": limit,
+            "returned": len(result),
+            "total": matched_total,
+            "truncated": (offset + len(result)) < matched_total,
+        }
     return safe_read(_inner)
 
 def get_imports():
@@ -618,55 +823,165 @@ def read_bytes(ea, size):
         return {"ea": hex(ea), "size": size, "hex": hex_str}
     return safe_read(_inner)
 
-def get_names(filter_str=None, max_count=1000):
-    """List all named items (functions, data labels, etc.)."""
+def get_names(filter_str=None, max_count=1000, offset=0, limit=None, start_ea=None, end_ea=None):
+    """List named items (functions, data labels, etc.) with pagination beyond 1000 and range/regex filters."""
+    eff_limit = bounded_int(limit if limit is not None else max_count, 'limit', 1, 10000)
+    offset = bounded_int(offset, 'offset', 0, 2 ** 31 - 1)
     def _inner():
         names = []
-        count = 0
+        matched_total = 0
+        pattern = None
+        if filter_str:
+            try:
+                pattern = re.compile(filter_str, re.IGNORECASE)
+            except re.error:
+                pattern = None
         for ea, name in idautils.Names():
-            if count >= max_count:
-                break
-            if filter_str and filter_str.lower() not in name.lower():
+            if start_ea is not None and ea < start_ea:
                 continue
-            names.append({"ea": hex(ea), "name": name})
-            count += 1
-        return {"names": names, "count": count, "truncated": count >= max_count}
+            if end_ea is not None and ea >= end_ea:
+                continue
+            if filter_str:
+                if pattern is not None:
+                    if not pattern.search(name):
+                        continue
+                elif filter_str.lower() not in name.lower():
+                    continue
+            if offset <= matched_total < offset + eff_limit:
+                names.append({
+                    "ea": hex(ea),
+                    "module_rva": _format_module_rva_inner(ea),
+                    "name": name,
+                })
+            matched_total += 1
+        return {
+            "names": names,
+            "offset": offset,
+            "limit": eff_limit,
+            "returned": len(names),
+            "count": len(names),
+            "total": matched_total,
+            "truncated": (offset + len(names)) < matched_total,
+        }
     return safe_read(_inner)
 
-def get_vtable(ea):
-    """Read vtable at address — follows consecutive function pointers."""
+
+def get_vtable(ea, max_entries=256):
+    """Read vtable at address — follows consecutive function pointers with prototypes and offsets."""
+    max_entries = bounded_int(max_entries if max_entries is not None else 256, 'max_entries', 1, 1024)
     def _inner():
         import ida_ida
         is_64 = ida_ida.inf_is_64bit() if hasattr(ida_ida, 'inf_is_64bit') else True
         ptr_size = 8 if is_64 else 4
         entries = []
         current = ea
-        for i in range(256):  # max 256 virtual methods
-            if is_64:
-                ptr = ida_bytes.get_qword(current)
-            else:
-                ptr = ida_bytes.get_dword(current)
+        for i in range(max_entries):
+            ptr = ida_bytes.get_qword(current) if is_64 else ida_bytes.get_dword(current)
             if ptr == 0 or ptr == idc.BADADDR:
                 break
             func = ida_funcs.get_func(ptr)
             if not func:
-                break
+                # Also accept executable code pointers even if function boundaries aren't created yet
+                flags = ida_bytes.get_full_flags(ptr) if hasattr(ida_bytes, 'get_full_flags') else ida_bytes.get_flags(ptr)
+                if not ida_bytes.is_code(flags):
+                    break
+            fname = ida_funcs.get_func_name(func.start_ea) if func else (ida_name.get_name(ptr) or f"sub_{ptr:x}")
+            demangled = None
+            try:
+                demangled = ida_name.demangle_name(fname, 0) if hasattr(ida_name, 'demangle_name') else None
+            except Exception:
+                pass
+            proto = None
+            tinfo = ida_typeinf.tinfo_t()
+            if ida_nalt.get_tinfo(tinfo, ptr):
+                proto = str(tinfo)
             entries.append({
                 "index": i,
+                "offset": hex(i * ptr_size),
+                "offset_dec": i * ptr_size,
                 "ea": hex(current),
                 "target": hex(ptr),
-                "name": ida_funcs.get_func_name(func.start_ea),
+                "target_module_rva": _format_module_rva_inner(ptr),
+                "name": fname,
+                "demangled": demangled,
+                "prototype": proto,
+                "func_size": func.size() if func else None,
             })
             current += ptr_size
-        return {"vtable_ea": hex(ea), "entries": entries, "count": len(entries)}
+        return {
+            "vtable_ea": hex(ea),
+            "vtable_module_rva": _format_module_rva_inner(ea),
+            "ptr_size": ptr_size,
+            "entries": entries,
+            "count": len(entries),
+        }
     return safe_read(_inner)
 
-def decompile_batch(ea_list):
-    """Decompile multiple functions at once."""
+
+def create_vtable_struct_api(ea, struct_name=None, max_entries=256, name=None):
+    """Create or update a C structure with typed function pointer members for a vtable at `ea`."""
+    vt = get_vtable(ea, max_entries=max_entries)
+    entries = vt.get("entries", [])
+    if not entries:
+        return {"success": False, "error": f"No valid vtable entries found at {hex(ea)}"}
+    sname = (name or struct_name or "").strip() or f"VTable_{ea:X}"
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', sname):
+        raise ValueError("Invalid struct name")
+    fields = []
+    seen_field_names = set()
+    for entry in entries:
+        idx = entry["index"]
+        raw_name = entry.get("name") or f"vfunc_{idx}"
+        clean = re.sub(r'[^A-Za-z0-9_]', '_', raw_name).strip('_') or f"vfunc_{idx}"
+        if clean[0].isdigit():
+            clean = "fn_" + clean
+        if clean in seen_field_names:
+            clean = f"{clean}_{idx}"
+        seen_field_names.add(clean)
+        fields.append(f"    void *(*{clean})(void *this);")
+    c_decl = f"struct {sname} {{\n" + "\n".join(fields) + "\n};"
+    res = create_struct(c_decl)
+    res["vtable_ea"] = hex(ea)
+    res["struct_name"] = sname
+    res["entry_count"] = len(entries)
+    res["c_declaration"] = c_decl
+    return res
+
+
+def decompile_batch(ea_list, output_path=None, fmt="json"):
+    """Decompile multiple functions at once and optionally save results to a JSON or C file."""
     results = []
-    for ea in ea_list:
-        results.append(get_pseudocode(ea))
-    return {"results": results, "count": len(results)}
+    succeeded = 0
+    for item in ea_list:
+        ea = parse_ea(item) if not isinstance(item, int) else item
+        r = get_pseudocode(ea)
+        results.append(r)
+        if not r.get("error"):
+            succeeded += 1
+    out = {
+        "results": results,
+        "count": len(results),
+        "succeeded": succeeded,
+        "failed": len(results) - succeeded,
+    }
+    if output_path:
+        out_path = os.path.abspath(os.path.expanduser(str(output_path)))
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        if str(fmt).lower() == "c" or out_path.lower().endswith((".c", ".cc", ".cpp", ".h")):
+            chunks = []
+            for r in results:
+                chunks.append(f"// === Function: {r.get('name', 'unknown')} @ {r.get('ea', '?')} ===")
+                if r.get("error"):
+                    chunks.append(f"// ERROR: {r['error']}\n")
+                else:
+                    chunks.append(r.get("pseudocode", "") + "\n")
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(chunks))
+        else:
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2, ensure_ascii=False)
+        out["saved_to"] = out_path
+    return out
 
 def get_func_details(ea):
     """Get detailed function info: calling convention, frame, flags."""
@@ -1704,105 +2019,979 @@ def get_code_xrefs(ea):
         return {"ea":hex(ea),"code_xrefs":refs,"count":len(refs)}
     return safe_read(_inner)
 
-# ─── Debugger API ────────────────────────────────────────────────────────────
+# ─── IDA 9.5 Decompiler & Class Model API ────────────────────────────────────
+
+def get_decompiler_timeout_api():
+    if not HAS_HEXRAYS:
+        return {"error": "Hex-Rays not available"}
+    def _inner():
+        if not hasattr(ida_hexrays, 'get_decompiler_timeout'):
+            return {"supported": False, "timeout_ms": 0}
+        return {"supported": True, "timeout_ms": int(ida_hexrays.get_decompiler_timeout())}
+    return safe_read(_inner)
+
+def set_decompiler_timeout_api(timeout_ms):
+    timeout_ms = bounded_int(timeout_ms, 'timeout_ms', 0, 3600000)
+    if not HAS_HEXRAYS:
+        return {"error": "Hex-Rays not available"}
+    def _inner():
+        if not hasattr(ida_hexrays, 'set_decompiler_timeout'):
+            return {"error": "set_decompiler_timeout requires IDA 9.5+"}
+        prev = ida_hexrays.set_decompiler_timeout(timeout_ms)
+        return {"success": True, "timeout_ms": timeout_ms, "previous_ms": int(prev) if prev is not None else 0}
+    return safe_write(_inner)
+
+def get_classes_api(filter_pattern=None, toplevel_only=False, include_hidden=False):
+    def _inner():
+        if HAS_HEXRAYS and hasattr(ida_hexrays, 'get_classes') and hasattr(ida_hexrays, 'classes_t'):
+            out = ida_hexrays.classes_t()
+            flt = None
+            if filter_pattern or toplevel_only or include_hidden:
+                flt = ida_hexrays.class_filter_t()
+                if filter_pattern:
+                    flt.name = str(filter_pattern)
+                flags = 0
+                if toplevel_only:
+                    flags |= getattr(ida_hexrays, 'GCL_TOPLEVEL_ONLY', 1)
+                if include_hidden:
+                    flags |= getattr(ida_hexrays, 'GCL_INCLUDE_HIDDEN', 2)
+                flt.flags = flags
+            if ida_hexrays.get_classes(out, flt):
+                kind_map = {
+                    getattr(ida_hexrays, 'CK_CLASS', 0): 'class',
+                    getattr(ida_hexrays, 'CK_STRUCT', 1): 'struct',
+                    getattr(ida_hexrays, 'CK_INTERFACE', 2): 'interface',
+                    getattr(ida_hexrays, 'CK_ENUM', 3): 'enum',
+                    getattr(ida_hexrays, 'CK_UNION', 4): 'union',
+                    getattr(ida_hexrays, 'CK_ANNOTATION', 5): 'annotation',
+                }
+                classes = []
+                for i in range(out.size()):
+                    c = out.at(i)
+                    classes.append({
+                        "name": c.name,
+                        "outer": c.outer or None,
+                        "ea": hex(c.ea) if c.ea != ida_idaapi.BADADDR else None,
+                        "kind": kind_map.get(c.kind, str(c.kind)),
+                        "flags": int(c.flags),
+                        "type": str(c.tif) if c.tif and not c.tif.empty() else None,
+                    })
+                return {"classes": classes, "count": len(classes), "source": "hexrays_class_model"}
+        # Fallback to UDT structures when decompiler class model is not active
+        structs = get_structs().get("structs", [])
+        if filter_pattern:
+            pat = re.compile(filter_pattern.replace('*', '.*').replace('?', '.'), re.IGNORECASE)
+            structs = [s for s in structs if s.get("name") and pat.search(s["name"])]
+        classes = [
+            {
+                "name": s["name"],
+                "outer": None,
+                "ea": None,
+                "kind": "union" if s.get("is_union") else "struct",
+                "flags": 0,
+                "size": s.get("size", 0),
+            }
+            for s in structs
+        ]
+        return {"classes": classes, "count": len(classes), "source": "udt_fallback"}
+    return safe_read(_inner)
+
+def get_class_details_api(name, ea=None, render=True, no_bodies=False):
+    def _inner():
+        if HAS_HEXRAYS and hasattr(ida_hexrays, 'get_class_info') and hasattr(ida_hexrays, 'class_info_t'):
+            cls = ida_hexrays.class_t()
+            cls.name = str(name)
+            if ea is not None:
+                cls.ea = ea
+            info = ida_hexrays.class_info_t()
+            if ida_hexrays.get_class_info(info, cls, 0):
+                fields = []
+                for f in info.fields:
+                    fields.append({
+                        "name": f.name,
+                        "type": f.typestr or str(f.type),
+                        "value": f.value or None,
+                        "decl": f.decl,
+                        "ea": hex(f.ea) if f.ea != ida_idaapi.BADADDR else None,
+                        "flags": int(f.flags),
+                    })
+                methods = []
+                for m in info.methods:
+                    methods.append({
+                        "name": m.name,
+                        "type": m.typestr or str(m.type),
+                        "decl": m.decl,
+                        "ea": hex(m.ea) if m.ea != ida_idaapi.BADADDR else None,
+                        "flags": int(m.flags),
+                    })
+                rendered_code = None
+                if render and hasattr(ida_hexrays, 'render_class'):
+                    rc_flags = getattr(ida_hexrays, 'RCF_NO_BODIES', 1) if no_bodies else 0
+                    ok, lines = ida_hexrays.render_class(info.cls, rc_flags)
+                    if ok and lines:
+                        rendered_code = "\n".join(lines)
+                return {
+                    "name": info.cls.name,
+                    "ea": hex(info.cls.ea) if info.cls.ea != ida_idaapi.BADADDR else None,
+                    "source_file": info.source_file or None,
+                    "type_params": info.type_params or None,
+                    "supertypes": list(info.supertypes),
+                    "interfaces": list(info.interfaces),
+                    "attributes": list(info.attrs),
+                    "nested": list(info.nested),
+                    "header": list(info.decl),
+                    "fields": fields,
+                    "methods": methods,
+                    "rendered": rendered_code,
+                    "source": "hexrays_class_model",
+                }
+        struct_res = get_struct_details(name)
+        if not struct_res.get("error"):
+            struct_res["source"] = "udt_fallback"
+            return struct_res
+        return {"error": f"Class '{name}' not found"}
+    return safe_read(_inner)
+
+# ─── Debugger API (Extended for IDA 9.5) ─────────────────────────────────────
+
+import collections
+import time as _time
+
+_dbg_events = collections.deque(maxlen=500)
+_dbg_events_lock = threading.Lock()
+_last_dbg_stop_reason = None
+_bp_policies = {}  # ea -> {"tid": int|None, "action": str, "auto_continue": bool, "log_regs": list, "hit_count": int, "module_rva": str|None}
+
+def _record_dbg_event(event):
+    entry = dict(event)
+    entry.setdefault("timestamp", round(_time.time(), 3))
+    with _dbg_events_lock:
+        _dbg_events.append(entry)
+    _publish_event(event)
+
+def _explicit_dbg_status(ida_dbg_mod, state=None):
+    """Return explicit debugger status: not_attached, running, paused, or breakpoint_hit."""
+    try:
+        dbg_on = bool(ida_dbg_mod.is_debugger_on()) if hasattr(ida_dbg_mod, 'is_debugger_on') else False
+        if not dbg_on:
+            return "not_attached"
+        if state is None:
+            state = ida_dbg_mod.get_process_state() if hasattr(ida_dbg_mod, 'get_process_state') else -1
+        if state == 0:
+            return "not_attached"
+        if state == 1:
+            return "running"
+        if state == -1:
+            return "breakpoint_hit" if _last_dbg_stop_reason == "breakpoint_hit" else "paused"
+        if hasattr(ida_dbg_mod, 'is_debugger_busy') and ida_dbg_mod.is_debugger_busy():
+            return "running"
+        return "breakpoint_hit" if _last_dbg_stop_reason == "breakpoint_hit" else "paused"
+    except Exception:
+        return "not_attached"
+
+def _read_regs_inner(ida_dbg_mod, tid=None, include_all=False, reg_names=None):
+    """Read live register values (inside safe_read/safe_write) without polluting with None values."""
+    import ida_idd
+    regs = {}
+    rv = ida_idd.regval_t() if hasattr(ida_idd, 'regval_t') else None
+    candidates = reg_names or [
+        "rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15","rip","eflags",
+        "eax","ebx","ecx","edx","esi","edi","ebp","esp","eip",
+        "x0","x1","x2","x3","x4","x5","x6","x7","x8","x19","x20","x29","x30","sp","pc",
+    ]
+    for name in candidates:
+        try:
+            if rv is not None and hasattr(ida_dbg_mod, 'get_reg_val') and ida_dbg_mod.get_reg_val(name, rv):
+                regs[name] = hex(rv.ival)
+            elif hasattr(ida_dbg_mod, 'get_reg_val'):
+                val = ida_dbg_mod.get_reg_val(name)
+                if isinstance(val, int):
+                    regs[name] = hex(val)
+        except Exception:
+            continue
+    if (include_all or not regs) and not reg_names:
+        try:
+            target_tid = int(tid) if tid is not None else (ida_dbg_mod.get_current_thread() if hasattr(ida_dbg_mod, 'get_current_thread') else 0)
+            dbg = ida_idd.get_dbg() if hasattr(ida_idd, 'get_dbg') else None
+            if dbg and hasattr(ida_dbg_mod, 'get_reg_vals'):
+                regvals = ida_dbg_mod.get_reg_vals(target_tid)
+                for ridx, rval_obj in enumerate(regvals):
+                    rinfo = dbg.regs(ridx)
+                    val = rval_obj.pyval(rinfo.dtype)
+                    if isinstance(val, int):
+                        regs[rinfo.name] = hex(val)
+                    elif isinstance(val, bytes):
+                        regs[rinfo.name] = val.hex()
+                    elif val is not None:
+                        regs[rinfo.name] = str(val)
+        except Exception:
+            pass
+    return regs
 
 def _dbg_available():
     try:
         import ida_dbg
         return ida_dbg is not None
-    except: return False
+    except Exception:
+        return False
+
+def _bpt_const(ida_dbg_mod, name, default):
+    if hasattr(ida_dbg_mod, name):
+        return getattr(ida_dbg_mod, name)
+    try:
+        import ida_idd
+        if hasattr(ida_idd, name):
+            return getattr(ida_idd, name)
+    except Exception:
+        pass
+    if hasattr(idc, name):
+        return getattr(idc, name)
+    return default
+
+def _auto_select_debugger(ida_dbg_mod):
+    """Automatically load the matching local debugger if none is loaded yet."""
+    try:
+        if hasattr(ida_dbg_mod, 'dbg_is_loaded') and ida_dbg_mod.dbg_is_loaded():
+            return True
+        if not hasattr(ida_dbg_mod, 'load_debugger'):
+            return False
+        import ida_ida
+        ft = ida_ida.inf_get_filetype() if hasattr(ida_ida, 'inf_get_filetype') else -1
+        dbg_name = None
+        if hasattr(ida_ida, 'f_PE') and ft == ida_ida.f_PE:
+            dbg_name = "win32"
+        elif hasattr(ida_ida, 'f_ELF') and ft == ida_ida.f_ELF:
+            dbg_name = "linux"
+        elif hasattr(ida_ida, 'f_MACHO') and ft == ida_ida.f_MACHO:
+            dbg_name = "mac"
+        elif os.name == 'nt':
+            dbg_name = "win32"
+        if dbg_name:
+            return bool(ida_dbg_mod.load_debugger(dbg_name, False))
+    except Exception:
+        pass
+    return False
+
+def _dbg_state_name(state):
+    if state == -1:
+        return "suspended"
+    if state == 1:
+        return "running"
+    if state == 0:
+        return "no_process"
+    return f"state_{state}"
+
+def _dbg_read_ip_sp(ida_dbg_mod):
+    ip_val, sp_val = None, None
+    try:
+        if hasattr(ida_dbg_mod, 'get_ip_val'):
+            v = ida_dbg_mod.get_ip_val()
+            if isinstance(v, int):
+                ip_val = v
+            elif isinstance(v, (list, tuple)) and len(v) >= 2 and v[0]:
+                ip_val = v[1]
+    except Exception:
+        pass
+    try:
+        if hasattr(ida_dbg_mod, 'get_sp_val'):
+            v = ida_dbg_mod.get_sp_val()
+            if isinstance(v, int):
+                sp_val = v
+            elif isinstance(v, (list, tuple)) and len(v) >= 2 and v[0]:
+                sp_val = v[1]
+    except Exception:
+        pass
+    if ip_val is None:
+        for rname in ("rip", "eip", "pc"):
+            try:
+                v = ida_dbg_mod.get_reg_val(rname)
+                if isinstance(v, int):
+                    ip_val = v
+                    break
+            except Exception:
+                continue
+    if sp_val is None:
+        for rname in ("rsp", "esp", "sp"):
+            try:
+                v = ida_dbg_mod.get_reg_val(rname)
+                if isinstance(v, int):
+                    sp_val = v
+                    break
+            except Exception:
+                continue
+    return ip_val, sp_val
+
+def _dbg_wait_helper(ida_dbg_mod, timeout_sec=5):
+    """Wait for the next debugger suspend event and return snapshot with explicit status and registers."""
+    if not hasattr(ida_dbg_mod, 'wait_for_next_event'):
+        return {}
+    wfne = getattr(ida_dbg_mod, 'WFNE_SUSP', 2) | getattr(ida_dbg_mod, 'WFNE_SILENT', 4)
+    code = ida_dbg_mod.wait_for_next_event(wfne, max(1, int(timeout_sec)))
+    ip_val, sp_val = _dbg_read_ip_sp(ida_dbg_mod)
+    state = ida_dbg_mod.get_process_state() if hasattr(ida_dbg_mod, 'get_process_state') else 0
+    status = _explicit_dbg_status(ida_dbg_mod, state)
+    snap = {
+        "wait_code": int(code) if isinstance(code, int) else str(code),
+        "status": status,
+        "process_state": state,
+        "state_name": _dbg_state_name(state),
+        "ip": hex(ip_val) if ip_val is not None else None,
+        "ip_module_rva": _format_module_rva_inner(ip_val) if ip_val is not None else None,
+        "sp": hex(sp_val) if sp_val is not None else None,
+    }
+    if state == -1 or status in ("paused", "breakpoint_hit"):
+        snap["registers"] = _read_regs_inner(ida_dbg_mod)
+    if ip_val is not None:
+        try:
+            snap["disasm_at_ip"] = idc.generate_disasm_line(ip_val, 0)
+            func = ida_funcs.get_func(ip_val)
+            snap["func_at_ip"] = ida_funcs.get_func_name(func.start_ea) if func else None
+        except Exception:
+            pass
+    return snap
+
+def dbg_get_status():
+    """Return comprehensive live debugger status with explicit status enum."""
+    def _inner():
+        import ida_dbg
+        dbg_on = bool(ida_dbg.is_debugger_on()) if hasattr(ida_dbg, 'is_debugger_on') else False
+        dbg_loaded = bool(ida_dbg.dbg_is_loaded()) if hasattr(ida_dbg, 'dbg_is_loaded') else dbg_on
+        state = ida_dbg.get_process_state() if hasattr(ida_dbg, 'get_process_state') else 0
+        can_query = bool(ida_dbg.dbg_can_query()) if hasattr(ida_dbg, 'dbg_can_query') else False
+        busy = bool(ida_dbg.is_debugger_busy()) if hasattr(ida_dbg, 'is_debugger_busy') else False
+        dbg_name = None
+        try:
+            import ida_idd
+            dbg_name = ida_idd.dbg_get_name() if hasattr(ida_idd, 'dbg_get_name') else None
+        except Exception:
+            pass
+        tid = ida_dbg.get_current_thread() if (dbg_on and hasattr(ida_dbg, 'get_current_thread')) else None
+        tqty = ida_dbg.get_thread_qty() if (dbg_on and hasattr(ida_dbg, 'get_thread_qty')) else 0
+        ip_val, sp_val = _dbg_read_ip_sp(ida_dbg) if dbg_on else (None, None)
+        func_name, disasm = None, None
+        if ip_val is not None:
+            try:
+                f = ida_funcs.get_func(ip_val)
+                func_name = ida_funcs.get_func_name(f.start_ea) if f else None
+                disasm = idc.generate_disasm_line(ip_val, 0)
+            except Exception:
+                pass
+        return {
+            "status": _explicit_dbg_status(ida_dbg, state),
+            "debugger_on": dbg_on,
+            "debugger_loaded": dbg_loaded,
+            "debugger_name": dbg_name,
+            "process_state": state,
+            "state_name": _dbg_state_name(state),
+            "can_query": can_query,
+            "is_busy": busy,
+            "current_tid": tid,
+            "thread_count": tqty,
+            "ip": hex(ip_val) if ip_val is not None else None,
+            "ip_module_rva": _format_module_rva_inner(ip_val) if ip_val is not None else None,
+            "sp": hex(sp_val) if sp_val is not None else None,
+            "current_func": func_name,
+            "disasm_at_ip": disasm,
+            "step_trace_enabled": bool(ida_dbg.is_step_trace_enabled()) if hasattr(ida_dbg, 'is_step_trace_enabled') else False,
+            "insn_trace_enabled": bool(ida_dbg.is_insn_trace_enabled()) if hasattr(ida_dbg, 'is_insn_trace_enabled') else False,
+            "func_trace_enabled": bool(ida_dbg.is_func_trace_enabled()) if hasattr(ida_dbg, 'is_func_trace_enabled') else False,
+            "bblk_trace_enabled": bool(ida_dbg.is_bblk_trace_enabled()) if hasattr(ida_dbg, 'is_bblk_trace_enabled') else False,
+            "tev_count": int(ida_dbg.get_tev_qty()) if hasattr(ida_dbg, 'get_tev_qty') else 0,
+        }
+    return safe_read(_inner)
+
+def dbg_load_backend(name=None, remote=False, host="", port=-1, password="", use_remote=None, hostname=None):
+    """Load a debugger backend (e.g. win32, linux, mac, gdb, windbg, dalvik) and configure remote target."""
+    if use_remote is not None:
+        remote = bool(use_remote)
+    if hostname is not None and not host:
+        host = hostname
+    def _inner():
+        import ida_dbg
+        dbg_name = name
+        if not dbg_name:
+            _auto_select_debugger(ida_dbg)
+            try:
+                import ida_idd
+                dbg_name = ida_idd.dbg_get_name() if hasattr(ida_idd, 'dbg_get_name') else "auto"
+            except Exception:
+                dbg_name = "auto"
+            loaded = bool(ida_dbg.dbg_is_loaded()) if hasattr(ida_dbg, 'dbg_is_loaded') else True
+            return {"success": loaded, "debugger": dbg_name, "remote": bool(remote)}
+        if (remote or host) and hasattr(ida_dbg, 'set_remote_debugger'):
+            ida_dbg.set_remote_debugger(str(host or ""), str(password or ""), int(port if port is not None else -1))
+        ok = bool(ida_dbg.load_debugger(str(dbg_name), bool(remote))) if hasattr(ida_dbg, 'load_debugger') else False
+        return {"success": ok, "debugger": str(dbg_name), "remote": bool(remote), "host": host or None, "port": port}
+    return safe_write(_inner)
 
 def dbg_start_process(path=None, args="", sdir=None):
     def _inner():
         import ida_dbg
+        _auto_select_debugger(ida_dbg)
         p = path if path else ida_nalt.get_input_file_path()
         ok = ida_dbg.start_process(p, args, sdir or "")
-        return {"success":ok==1,"path":p}
+        return {"success": ok == 1, "code": ok, "path": p, "args": args}
     return safe_write(_inner)
 
+def dbg_exit_process():
+    """Terminate the debugged process."""
+    def _inner():
+        global _last_dbg_stop_reason
+        import ida_dbg
+        if hasattr(ida_dbg, 'is_debugger_on') and not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        ok = bool(ida_dbg.exit_process()) if hasattr(ida_dbg, 'exit_process') else False
+        if ok:
+            _last_dbg_stop_reason = None
+        return {"success": ok}
+    return safe_write(_inner)
+
+def dbg_list_processes():
+    """Snapshot running processes available to attach."""
+    def _inner():
+        import ida_dbg, ida_idd
+        _auto_select_debugger(ida_dbg)
+        if not hasattr(ida_dbg, 'get_processes') or not hasattr(ida_idd, 'procinfo_vec_t'):
+            return {"processes": [], "count": 0}
+        proclist = ida_idd.procinfo_vec_t()
+        qty = ida_dbg.get_processes(proclist)
+        if qty < 0:
+            return {"error": "Cannot enumerate processes (debugger backend not ready)", "processes": [], "count": 0}
+        procs = []
+        for i in range(len(proclist)):
+            p = proclist[i]
+            procs.append({"pid": int(p.pid), "name": str(p.name)})
+        return {"processes": procs, "count": len(procs)}
+    return safe_read(_inner)
+
 def dbg_attach_process(pid):
+    pid = bounded_int(pid, 'pid', -1, 2 ** 31 - 1)
     def _inner():
         import ida_dbg
+        _auto_select_debugger(ida_dbg)
         ok = ida_dbg.attach_process(pid, -1)
-        return {"success":ok==1,"pid":pid}
+        return {"success": ok == 1, "code": ok, "pid": pid}
     return safe_write(_inner)
 
 def dbg_detach():
     def _inner():
+        global _last_dbg_stop_reason
         import ida_dbg
-        ok = ida_dbg.detach_process()
-        return {"success":ok}
+        ok = bool(ida_dbg.detach_process())
+        if ok:
+            _last_dbg_stop_reason = None
+        return {"success": ok}
     return safe_write(_inner)
 
-def dbg_set_bp(ea, is_hw=False):
+def _resolve_bpt_type(ida_dbg_mod, mode_str, is_hw):
+    mode = (mode_str or "").strip().lower()
+    if mode in ("write", "w"):
+        return _bpt_const(ida_dbg_mod, "BPT_WRITE", 1), True, "write"
+    if mode in ("read", "r"):
+        return _bpt_const(ida_dbg_mod, "BPT_READ", 2), True, "read"
+    if mode in ("rw", "rdwr", "readwrite"):
+        return _bpt_const(ida_dbg_mod, "BPT_RDWR", 3), True, "rdwr"
+    if mode == "hw_exec":
+        return _bpt_const(ida_dbg_mod, "BPT_EXEC", 0), True, "exec"
+    if mode in ("exec", "x"):
+        if is_hw:
+            return _bpt_const(ida_dbg_mod, "BPT_EXEC", 0), True, "exec"
+        return _bpt_const(ida_dbg_mod, "BPT_SOFT", 4), False, "soft"
+    if mode in ("soft", "sw", "software"):
+        return _bpt_const(ida_dbg_mod, "BPT_SOFT", 4), False, "soft"
+    if is_hw:
+        return _bpt_const(ida_dbg_mod, "BPT_EXEC", 0), True, "exec"
+    return _bpt_const(ida_dbg_mod, "BPT_SOFT", 4), False, "soft"
+
+def dbg_set_bp(ea, is_hw=False, bp_type=None, size=0, condition=None, elang="Python", pass_count=0,
+               trace_only=False, enabled=True, hardware=None, mode=None, tid=None, action=None,
+               auto_continue=False, log_regs=None):
+    if hardware is not None:
+        is_hw = bool(hardware)
+    if mode is not None and bp_type is None:
+        bp_type = mode
+    if size:
+        size = bounded_int(size, 'breakpoint size', 0, 64)
+    if pass_count:
+        pass_count = bounded_int(pass_count, 'pass_count', 0, 2 ** 31 - 1)
+    if tid is not None:
+        tid = bounded_int(tid, 'tid', 0, 2 ** 31 - 1)
+    act_norm = (action or ("log_and_continue" if auto_continue else "stop")).strip().lower()
+    if act_norm in ("log_and_continue", "log_continue", "continue", "auto_continue"):
+        auto_continue = True
+        act_norm = "log_and_continue"
+    else:
+        act_norm = "stop"
+    if isinstance(log_regs, str):
+        log_regs = [r.strip() for r in log_regs.split(",") if r.strip()]
+    elif isinstance(log_regs, (list, tuple)):
+        log_regs = [str(r).strip() for r in log_regs if str(r).strip()]
+    else:
+        log_regs = []
     def _inner():
         import ida_dbg
-        if is_hw: ok = ida_dbg.add_bpt(ea, 1, ida_dbg.BPT_EXEC)
-        else: ok = ida_dbg.add_bpt(ea)
-        return {"success":ok,"ea":hex(ea),"hardware":is_hw}
+        btype, hw_flag, mode_name = _resolve_bpt_type(ida_dbg, bp_type, is_hw)
+        bp_size = size if size > 0 else (1 if hw_flag else 0)
+        # Keep exact 3-arg or 1-arg add_bpt call when default software/hw exec is used
+        if hw_flag or (bp_type and str(bp_type).lower() not in ("exec", "x", "soft", "sw", "software")) or size > 1:
+            ok = bool(ida_dbg.add_bpt(ea, bp_size, btype))
+        else:
+            ok = bool(ida_dbg.add_bpt(ea))
+        if ok and (condition or pass_count > 0 or trace_only or not enabled):
+            if hasattr(ida_dbg, 'bpt_t') and hasattr(ida_dbg, 'get_bpt') and hasattr(ida_dbg, 'update_bpt'):
+                bp = ida_dbg.bpt_t()
+                if ida_dbg.get_bpt(ea, bp):
+                    if condition is not None:
+                        bp.condition = str(condition)
+                        if elang:
+                            bp.elang = str(elang)
+                    if pass_count > 0:
+                        bp.pass_count = int(pass_count)
+                    if trace_only:
+                        bpt_trace = getattr(ida_dbg, 'BPT_TRACE', 2)
+                        bpt_brk = getattr(ida_dbg, 'BPT_BRK', 1)
+                        bp.flags = (bp.flags | bpt_trace) & ~bpt_brk
+                    if not enabled:
+                        bpt_enabled = getattr(ida_dbg, 'BPT_ENABLED', 8)
+                        bp.flags &= ~bpt_enabled
+                    ida_dbg.update_bpt(bp)
+        mod_rva = _format_module_rva_inner(ea)
+        if ok:
+            prev = _bp_policies.get(ea, {})
+            _bp_policies[ea] = {
+                "tid": tid,
+                "action": act_norm,
+                "auto_continue": bool(auto_continue),
+                "log_regs": log_regs,
+                "hit_count": int(prev.get("hit_count", 0)),
+                "module_rva": mod_rva,
+            }
+        return {
+            "success": ok,
+            "ea": hex(ea),
+            "module_rva": mod_rva,
+            "hardware": hw_flag,
+            "mode": mode_name,
+            "size": bp_size,
+            "condition": condition,
+            "pass_count": pass_count,
+            "trace_only": bool(trace_only),
+            "enabled": bool(enabled),
+            "tid": tid,
+            "action": act_norm,
+            "auto_continue": bool(auto_continue),
+            "log_regs": log_regs,
+        }
     return safe_write(_inner)
 
 def dbg_del_bp(ea):
     def _inner():
         import ida_dbg
-        ok = ida_dbg.del_bpt(ea)
-        return {"success":ok,"ea":hex(ea)}
+        ok = bool(ida_dbg.del_bpt(ea))
+        _bp_policies.pop(ea, None)
+        return {"success": ok, "ea": hex(ea), "module_rva": _format_module_rva_inner(ea)}
+    return safe_write(_inner)
+
+def dbg_toggle_bp(ea, enabled=True, enable=None):
+    if enable is not None:
+        enabled = bool(enable)
+    def _inner():
+        import ida_dbg
+        if bool(enabled):
+            ok = bool(ida_dbg.enable_bpt(ea, True) if hasattr(ida_dbg, 'enable_bpt') else False)
+        else:
+            if hasattr(ida_dbg, 'disable_bpt'):
+                ok = bool(ida_dbg.disable_bpt(ea))
+            elif hasattr(ida_dbg, 'enable_bpt'):
+                ok = bool(ida_dbg.enable_bpt(ea, False))
+            else:
+                ok = False
+        return {"success": ok, "ea": hex(ea), "module_rva": _format_module_rva_inner(ea), "enabled": bool(enabled)}
+    return safe_write(_inner)
+
+def dbg_update_bp(ea, condition=None, elang=None, pass_count=None, trace_only=None, enabled=None,
+                  mode=None, size=None, tid=None, action=None, auto_continue=None, log_regs=None):
+    if pass_count is not None:
+        pass_count = bounded_int(pass_count, 'pass_count', 0, 2 ** 31 - 1)
+    if size is not None:
+        size = bounded_int(size, 'breakpoint size', 0, 64)
+    if tid is not None and tid != -1:
+        tid = bounded_int(tid, 'tid', 0, 2 ** 31 - 1)
+    def _inner():
+        import ida_dbg
+        if not (hasattr(ida_dbg, 'bpt_t') and hasattr(ida_dbg, 'get_bpt') and hasattr(ida_dbg, 'update_bpt')):
+            return {"error": "Breakpoint update API not available"}
+        bp = ida_dbg.bpt_t()
+        if not ida_dbg.get_bpt(ea, bp):
+            return {"error": f"No breakpoint found at {hex(ea)}"}
+        if condition is not None:
+            bp.condition = str(condition)
+        if elang is not None:
+            bp.elang = str(elang)
+        if pass_count is not None:
+            bp.pass_count = int(pass_count)
+        if mode is not None:
+            btype, _, _ = _resolve_bpt_type(ida_dbg, mode, True)
+            bp.type = btype
+        if size is not None and size > 0:
+            bp.size = int(size)
+        if trace_only is not None:
+            bpt_trace = getattr(ida_dbg, 'BPT_TRACE', 2)
+            bpt_brk = getattr(ida_dbg, 'BPT_BRK', 1)
+            if trace_only:
+                bp.flags = (bp.flags | bpt_trace) & ~bpt_brk
+            else:
+                bp.flags = (bp.flags | bpt_brk) & ~bpt_trace
+        if enabled is not None:
+            bpt_enabled = getattr(ida_dbg, 'BPT_ENABLED', 8)
+            if enabled:
+                bp.flags |= bpt_enabled
+            else:
+                bp.flags &= ~bpt_enabled
+        ok = bool(ida_dbg.update_bpt(bp))
+        pol = _bp_policies.setdefault(ea, {
+            "tid": None, "action": "stop", "auto_continue": False,
+            "log_regs": [], "hit_count": 0, "module_rva": _format_module_rva_inner(ea)
+        })
+        if tid is not None:
+            pol["tid"] = None if tid == -1 else tid
+        if action is not None:
+            act_norm = str(action).strip().lower()
+            pol["action"] = "log_and_continue" if act_norm in ("log_and_continue", "log_continue", "continue", "auto_continue") else "stop"
+            pol["auto_continue"] = pol["action"] == "log_and_continue"
+        if auto_continue is not None:
+            pol["auto_continue"] = bool(auto_continue)
+            pol["action"] = "log_and_continue" if pol["auto_continue"] else "stop"
+        if log_regs is not None:
+            if isinstance(log_regs, str):
+                pol["log_regs"] = [r.strip() for r in log_regs.split(",") if r.strip()]
+            elif isinstance(log_regs, (list, tuple)):
+                pol["log_regs"] = [str(r).strip() for r in log_regs if str(r).strip()]
+        return {
+            "success": ok,
+            "ea": hex(ea),
+            "module_rva": pol.get("module_rva") or _format_module_rva_inner(ea),
+            "condition": getattr(bp, 'condition', None),
+            "pass_count": getattr(bp, 'pass_count', 0),
+            "enabled": bool(bp.flags & getattr(ida_dbg, 'BPT_ENABLED', 8)),
+            "tid": pol.get("tid"),
+            "action": pol.get("action", "stop"),
+            "auto_continue": bool(pol.get("auto_continue", False)),
+            "log_regs": pol.get("log_regs", []),
+            "hit_count": pol.get("hit_count", 0),
+        }
     return safe_write(_inner)
 
 def dbg_list_bps():
     def _inner():
         import ida_dbg
+        type_names = {
+            _bpt_const(ida_dbg, "BPT_EXEC", 0): "exec",
+            _bpt_const(ida_dbg, "BPT_WRITE", 1): "write",
+            _bpt_const(ida_dbg, "BPT_READ", 2): "read",
+            _bpt_const(ida_dbg, "BPT_RDWR", 3): "rdwr",
+            _bpt_const(ida_dbg, "BPT_SOFT", 4): "soft",
+        }
         bps = []
-        for i in range(ida_dbg.get_bpt_qty()):
+        qty = ida_dbg.get_bpt_qty() if hasattr(ida_dbg, 'get_bpt_qty') else 0
+        for i in range(qty):
             bp = ida_dbg.bpt_t()
             if ida_dbg.getn_bpt(i, bp):
-                bps.append({"ea":hex(bp.ea),"size":bp.size,"type":bp.type,"enabled":bool(bp.flags & ida_dbg.BPT_ENABLED)})
-        return {"breakpoints":bps,"count":len(bps)}
+                bpt_enabled = getattr(ida_dbg, 'BPT_ENABLED', 8)
+                bpt_trace = getattr(ida_dbg, 'BPT_TRACE', 2)
+                bpt_brk = getattr(ida_dbg, 'BPT_BRK', 1)
+                is_hw = bool(bp.is_hwbpt()) if hasattr(bp, 'is_hwbpt') else (bp.type != _bpt_const(ida_dbg, "BPT_SOFT", 4))
+                pol = _bp_policies.get(bp.ea, {})
+                bps.append({
+                    "ea": hex(bp.ea),
+                    "module_rva": pol.get("module_rva") or _format_module_rva_inner(bp.ea),
+                    "size": bp.size,
+                    "type": bp.type,
+                    "type_name": type_names.get(bp.type, f"type_{bp.type}"),
+                    "hardware": is_hw,
+                    "enabled": bool(bp.flags & bpt_enabled),
+                    "pass_count": getattr(bp, 'pass_count', 0),
+                    "hit_count": int(pol.get("hit_count", 0)),
+                    "condition": getattr(bp, 'condition', "") or "",
+                    "elang": getattr(bp, 'elang', "") or "",
+                    "trace_only": bool((bp.flags & bpt_trace) and not (bp.flags & bpt_brk)),
+                    "tid": pol.get("tid"),
+                    "action": pol.get("action", "stop"),
+                    "auto_continue": bool(pol.get("auto_continue", False)),
+                    "log_regs": pol.get("log_regs", []),
+                })
+        return {"breakpoints": bps, "count": len(bps)}
     return safe_read(_inner)
 
-def dbg_step_into_api():
+def dbg_export_bps(output_path=None):
+    """Export all current breakpoints (including module+RVA, conditions, and hit actions) to JSON."""
+    res = dbg_list_bps()
+    payload = {
+        "version": BRIDGE_VERSION,
+        "exported_at": round(_time.time(), 3),
+        "count": res.get("count", 0),
+        "breakpoints": res.get("breakpoints", []),
+    }
+    if output_path:
+        out_file = os.path.abspath(os.path.expanduser(str(output_path)))
+        out_dir = os.path.dirname(out_file)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(out_file, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+        payload["saved_to"] = out_file
+    return payload
+
+def dbg_import_bps(breakpoints=None, input_path=None, clear_existing=False):
+    """Restore a set of breakpoints from a list or JSON file, resolving module+RVA across ASLR."""
+    if input_path:
+        in_file = os.path.abspath(os.path.expanduser(str(input_path)))
+        if not os.path.isfile(in_file):
+            return {"error": f"Breakpoint file not found: {in_file}"}
+        with open(in_file, "r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            breakpoints = loaded.get("breakpoints", [])
+        elif isinstance(loaded, list):
+            breakpoints = loaded
+    if not isinstance(breakpoints, list):
+        raise ValueError("breakpoints must be a list or loaded via input_path")
+    if clear_existing:
+        existing = dbg_list_bps().get("breakpoints", [])
+        for item in existing:
+            try:
+                dbg_del_bp(parse_ea(item["ea"]))
+            except Exception:
+                pass
+    restored = []
+    errors = []
+    for item in breakpoints:
+        if not isinstance(item, dict):
+            continue
+        addr_spec = item.get("module_rva") or item.get("ea")
+        if not addr_spec:
+            continue
+        try:
+            try:
+                target_ea = parse_ea(addr_spec)
+            except Exception:
+                target_ea = parse_ea(item.get("ea", "0"))
+            bp_res = dbg_set_bp(
+                target_ea,
+                hardware=item.get("hardware", False),
+                mode=item.get("type_name") or item.get("mode") or "exec",
+                size=item.get("size", 1),
+                condition=item.get("condition") or "",
+                elang=item.get("elang") or "Python",
+                pass_count=item.get("pass_count", 0),
+                trace_only=item.get("trace_only", False),
+                enabled=item.get("enabled", True),
+                tid=item.get("tid"),
+                action=item.get("action", "stop"),
+                auto_continue=item.get("auto_continue", False),
+                log_regs=item.get("log_regs", []),
+            )
+            restored.append(bp_res)
+        except Exception as exc:
+            errors.append({"target": str(addr_spec), "error": str(exc)})
+    return {
+        "success": len(errors) == 0,
+        "restored": restored,
+        "restored_count": len(restored),
+        "errors": errors,
+    }
+
+def dbg_step_into_api(wait=False, timeout=5):
     def _inner():
+        global _last_dbg_stop_reason
         import ida_dbg
-        ok = ida_dbg.step_into()
-        return {"success":ok}
+        _last_dbg_stop_reason = "paused"
+        ok = bool(ida_dbg.step_into())
+        res = {"success": ok}
+        if ok and wait:
+            res.update(_dbg_wait_helper(ida_dbg, timeout))
+        return res
     return safe_write(_inner)
 
-def dbg_step_over_api():
+def dbg_step_over_api(wait=False, timeout=5):
     def _inner():
+        global _last_dbg_stop_reason
         import ida_dbg
-        ok = ida_dbg.step_over()
-        return {"success":ok}
+        _last_dbg_stop_reason = "paused"
+        ok = bool(ida_dbg.step_over())
+        res = {"success": ok}
+        if ok and wait:
+            res.update(_dbg_wait_helper(ida_dbg, timeout))
+        return res
     return safe_write(_inner)
 
-def dbg_continue_api():
+def dbg_step_out_api(wait=False, timeout=5):
+    """Step until current function returns (step_until_ret)."""
     def _inner():
+        global _last_dbg_stop_reason
         import ida_dbg
-        ok = ida_dbg.continue_process()
-        return {"success":ok}
+        _last_dbg_stop_reason = "paused"
+        ok = bool(ida_dbg.step_until_ret()) if hasattr(ida_dbg, 'step_until_ret') else False
+        res = {"success": ok}
+        if ok and wait:
+            res.update(_dbg_wait_helper(ida_dbg, timeout))
+        return res
+    return safe_write(_inner)
+
+def dbg_run_to_api(ea, pid=-1, tid=0, wait=False, timeout=10):
+    """Run execution until address ea."""
+    def _inner():
+        global _last_dbg_stop_reason
+        import ida_dbg
+        _last_dbg_stop_reason = "paused"
+        _auto_select_debugger(ida_dbg)
+        ok = bool(ida_dbg.run_to(ea)) if hasattr(ida_dbg, 'run_to') else False
+        res = {"success": ok, "target_ea": hex(ea), "target_module_rva": _format_module_rva_inner(ea)}
+        if ok and wait:
+            res.update(_dbg_wait_helper(ida_dbg, timeout))
+        return res
+    return safe_write(_inner)
+
+def dbg_continue_api(wait=False, timeout=10):
+    def _inner():
+        global _last_dbg_stop_reason
+        import ida_dbg
+        _last_dbg_stop_reason = None
+        ok = bool(ida_dbg.continue_process())
+        res = {"success": ok}
+        if ok and wait:
+            res.update(_dbg_wait_helper(ida_dbg, timeout))
+        return res
     return safe_write(_inner)
 
 def dbg_pause_api():
     def _inner():
+        global _last_dbg_stop_reason
         import ida_dbg
-        ok = ida_dbg.suspend_process()
-        return {"success":ok}
+        _last_dbg_stop_reason = "paused"
+        ok = bool(ida_dbg.suspend_process())
+        return {"success": ok, "status": "paused" if ok else _explicit_dbg_status(ida_dbg)}
     return safe_write(_inner)
 
-def dbg_get_regs():
+def dbg_wait_event(timeout=5, resume=False, wait_for_suspend=True, silent=True, wfne=None):
+    """Wait synchronously for the next debugger event."""
+    timeout = bounded_int(timeout, 'timeout', 0, 300)
     def _inner():
         import ida_dbg, ida_idd
-        if not ida_dbg.is_debugger_on():
-            return {'error': 'No active debugger'}
-        regs = {}
-        rv = ida_idd.regval_t()
-        for name in ["rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15","rip","eflags",
-                      "eax","ebx","ecx","edx","esi","edi","ebp","esp","eip"]:
+        if not hasattr(ida_dbg, 'wait_for_next_event'):
+            return {"error": "wait_for_next_event is not available"}
+        if wfne is not None:
+            wfne_flags = int(wfne)
+        else:
+            wfne_flags = 0
+            if wait_for_suspend:
+                wfne_flags |= getattr(ida_dbg, 'WFNE_SUSP', 2)
+            else:
+                wfne_flags |= getattr(ida_dbg, 'WFNE_ANY', 1)
+            if silent:
+                wfne_flags |= getattr(ida_dbg, 'WFNE_SILENT', 4)
+            if resume:
+                wfne_flags |= getattr(ida_dbg, 'WFNE_CONT', 8)
+            if timeout == 0:
+                wfne_flags |= getattr(ida_dbg, 'WFNE_NOWAIT', 16)
+        code = ida_dbg.wait_for_next_event(wfne_flags, timeout)
+        state = ida_dbg.get_process_state() if hasattr(ida_dbg, 'get_process_state') else 0
+        status = _explicit_dbg_status(ida_dbg, state)
+        ip_val, sp_val = _dbg_read_ip_sp(ida_dbg)
+        out = {
+            "success": isinstance(code, int) and code > 0,
+            "status": status,
+            "event_code": int(code) if isinstance(code, int) else str(code),
+            "timed_out": code == 0 or code == getattr(ida_dbg, 'DEC_TIMEOUT', -2),
+            "process_state": state,
+            "state_name": _dbg_state_name(state),
+            "ip": hex(ip_val) if ip_val is not None else None,
+            "ip_module_rva": _format_module_rva_inner(ip_val) if ip_val is not None else None,
+            "sp": hex(sp_val) if sp_val is not None else None,
+        }
+        if state == -1 or status in ("paused", "breakpoint_hit"):
+            out["registers"] = _read_regs_inner(ida_dbg)
+        if ip_val is not None:
             try:
-                if ida_dbg.get_reg_val(name, rv): regs[name] = hex(rv.ival)
+                out["disasm_at_ip"] = idc.generate_disasm_line(ip_val, 0)
+                f = ida_funcs.get_func(ip_val)
+                out["func_at_ip"] = ida_funcs.get_func_name(f.start_ea) if f else None
             except Exception:
-                regs[name] = None
-        return {"registers":regs}
+                pass
+        if isinstance(code, int) and code > 0 and hasattr(ida_dbg, 'get_debug_event'):
+            try:
+                ev = ida_dbg.get_debug_event()
+                if ev:
+                    out["event"] = {
+                        "eid": int(ev.eid()),
+                        "event_name": ida_idd.get_debug_event_name(ev) if hasattr(ida_idd, 'get_debug_event_name') else str(ev.eid()),
+                        "pid": int(ev.pid),
+                        "tid": int(ev.tid),
+                        "ea": hex(ev.ea) if ev.ea != ida_idaapi.BADADDR else None,
+                        "handled": bool(ev.handled),
+                    }
+                    if hasattr(ida_idd, 'get_event_exc_code') and ev.eid() == getattr(ida_idd, 'EXCEPTION', 0x20):
+                        out["event"]["exc_code"] = hex(ida_idd.get_event_exc_code(ev))
+                        out["event"]["exc_ea"] = hex(ida_idd.get_event_exc_ea(ev))
+                        out["event"]["exc_info"] = ida_idd.get_event_exc_info(ev)
+            except Exception:
+                pass
+        return out
+    return safe_write(_inner)
+
+def dbg_get_regs(tid=None, include_all=False):
+    def _inner():
+        import ida_dbg
+        state = ida_dbg.get_process_state() if hasattr(ida_dbg, 'get_process_state') else 0
+        status = _explicit_dbg_status(ida_dbg, state)
+        if status == "not_attached":
+            return {"status": "not_attached", "registers": {}, "message": "No active debugger"}
+        if status == "running":
+            return {"status": "running", "registers": {}, "message": "Process is currently running (not suspended)"}
+        if tid is not None and hasattr(ida_dbg, 'select_thread'):
+            try:
+                ida_dbg.select_thread(int(tid))
+            except Exception:
+                pass
+        regs = _read_regs_inner(ida_dbg, tid=tid, include_all=include_all)
+        ip_val, sp_val = _dbg_read_ip_sp(ida_dbg)
+        cur_tid = ida_dbg.get_current_thread() if hasattr(ida_dbg, 'get_current_thread') else tid
+        res = {
+            "status": status,
+            "current_tid": cur_tid,
+            "registers": regs,
+        }
+        if ip_val is not None:
+            res["ip"] = hex(ip_val)
+            res["ip_module_rva"] = _format_module_rva_inner(ip_val)
+        if sp_val is not None:
+            res["sp"] = hex(sp_val)
+        return res
     return safe_read(_inner)
+
+def dbg_set_reg(name, value, tid=None):
+    """Set CPU register value in the active debugger."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Register name must be a non-empty string")
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("Register value must be an int or hex string")
+    int_val = int(value.strip(), 0) if isinstance(value, str) else int(value)
+    def _inner():
+        import ida_dbg
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        if tid is not None and hasattr(ida_dbg, 'select_thread'):
+            ida_dbg.select_thread(int(tid))
+        ok = bool(ida_dbg.set_reg_val(name.strip(), int_val))
+        readback = None
+        try:
+            rb = ida_dbg.get_reg_val(name.strip())
+            if isinstance(rb, int):
+                readback = hex(rb)
+        except Exception:
+            pass
+        return {"success": ok, "register": name.strip(), "value": hex(int_val), "readback": readback}
+    return safe_write(_inner)
 
 def dbg_read_mem(ea, size):
     size = bounded_int(size, 'memory read size', 1, MAX_TRANSFER)
@@ -1811,8 +3000,10 @@ def dbg_read_mem(ea, size):
         if not ida_dbg.is_debugger_on():
             return {"error": "No active debugger"}
         data = ida_idd.dbg_read_memory(ea, size)
-        if not data: return {"error":f"Cannot read {size} bytes at {hex(ea)}"}
-        return {"ea":hex(ea),"size":size,"hex":' '.join(f'{b:02X}' for b in data)}
+        if not data:
+            return {"error": f"Cannot read {size} bytes at {hex(ea)}"}
+        ascii_preview = ''.join(chr(b) if 32 <= b < 127 else '.' for b in data[:256])
+        return {"ea": hex(ea), "size": len(data), "hex": ' '.join(f'{b:02X}' for b in data), "ascii": ascii_preview}
     return safe_read(_inner)
 
 def dbg_write_mem(ea, hex_bytes):
@@ -1823,19 +3014,199 @@ def dbg_write_mem(ea, hex_bytes):
         if not ida_dbg.is_debugger_on():
             return {"error": "No active debugger"}
         ok = ida_idd.dbg_write_memory(ea, data)
-        return {"success":ok == len(data),"ea":hex(ea),"size":len(data),"written":ok}
+        if type(ok) is bool:
+            written = len(data) if ok else 0
+            success = ok
+        else:
+            written = int(ok) if isinstance(ok, int) else 0
+            success = (ok == len(data))
+        return {"success": success, "ea": hex(ea), "size": len(data), "written": written}
     return safe_write(_inner)
+
+def dbg_get_modules():
+    """List loaded modules/DLLs/shared libraries in the debugged process."""
+    def _inner():
+        import ida_dbg, ida_idd
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        modules = []
+        if hasattr(ida_idd, 'modinfo_t') and hasattr(ida_dbg, 'get_first_module'):
+            mod = ida_idd.modinfo_t()
+            ok = ida_dbg.get_first_module(mod)
+            while ok:
+                modules.append({
+                    "name": mod.name,
+                    "base": hex(mod.base) if mod.base != ida_idaapi.BADADDR else None,
+                    "size": int(mod.size),
+                    "end": hex(mod.base + mod.size) if mod.base != ida_idaapi.BADADDR and mod.size else None,
+                    "rebase_to": hex(mod.rebase_to) if getattr(mod, 'rebase_to', ida_idaapi.BADADDR) != ida_idaapi.BADADDR else None,
+                })
+                ok = ida_dbg.get_next_module(mod)
+        return {"modules": modules, "count": len(modules)}
+    return safe_read(_inner)
+
+def dbg_get_memory_map(refresh=False):
+    """Retrieve live process virtual memory regions and permissions."""
+    def _inner():
+        import ida_dbg, ida_idd
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        if refresh and hasattr(ida_dbg, 'refresh_debugger_memory'):
+            try:
+                ida_dbg.refresh_debugger_memory()
+            except Exception:
+                pass
+        regions = []
+        if hasattr(ida_idd, 'meminfo_vec_t') and hasattr(ida_dbg, 'get_dbg_memory_info'):
+            ranges = ida_idd.meminfo_vec_t()
+            if ida_dbg.get_dbg_memory_info(ranges) > 0:
+                for m in ranges:
+                    perm_str = (
+                        f"{'r' if m.perm & ida_segment.SEGPERM_READ else '-'}"
+                        f"{'w' if m.perm & ida_segment.SEGPERM_WRITE else '-'}"
+                        f"{'x' if m.perm & ida_segment.SEGPERM_EXEC else '-'}"
+                    )
+                    regions.append({
+                        "start": hex(m.start_ea),
+                        "end": hex(m.end_ea),
+                        "size": int(m.end_ea - m.start_ea),
+                        "name": m.name or "",
+                        "sclass": m.sclass or "",
+                        "perm": perm_str,
+                        "bitness": {0: 16, 1: 32, 2: 64}.get(getattr(m, 'bitness', 2), 64),
+                    })
+        elif hasattr(ida_idd, 'dbg_get_memory_info'):
+            raw = ida_idd.dbg_get_memory_info() or []
+            for item in raw:
+                start_ea, end_ea, mname, sclass, _sbase, bitness, perm = item
+                perm_str = f"{'r' if perm & 4 else '-'}{'w' if perm & 2 else '-'}{'x' if perm & 1 else '-'}"
+                regions.append({
+                    "start": hex(start_ea),
+                    "end": hex(end_ea),
+                    "size": int(end_ea - start_ea),
+                    "name": mname or "",
+                    "sclass": sclass or "",
+                    "perm": perm_str,
+                    "bitness": {0: 16, 1: 32, 2: 64}.get(bitness, 64),
+                })
+        return {"regions": regions, "count": len(regions)}
+    return safe_read(_inner)
+
+def dbg_refresh_memory_api():
+    """Force IDA to refresh debugger memory layout and contents."""
+    def _inner():
+        import ida_dbg
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        if hasattr(ida_dbg, 'invalidate_dbgmem_config'):
+            ida_dbg.invalidate_dbgmem_config()
+        if hasattr(ida_dbg, 'invalidate_dbgmem_contents'):
+            ida_dbg.invalidate_dbgmem_contents(0, ida_idaapi.BADADDR)
+        if hasattr(ida_dbg, 'refresh_debugger_memory'):
+            ida_dbg.refresh_debugger_memory()
+        return {"success": True}
+    return safe_write(_inner)
+
+def _compile_wildcard_bytes(pattern_str):
+    tokens = pattern_str.strip().split()
+    # If not valid hex/wildcard tokens, treat as UTF-8 string bytes
+    if not tokens or not all(t in ('?', '??') or re.fullmatch(r'[0-9a-fA-F]{2}', t) for t in tokens):
+        raw = pattern_str.encode('utf-8')
+        return re.compile(re.escape(raw), re.DOTALL)
+    regex_parts = []
+    for t in tokens:
+        if t in ('?', '??'):
+            regex_parts.append(b'.')
+        else:
+            regex_parts.append(re.escape(bytes([int(t, 16)])))
+    return re.compile(b''.join(regex_parts), re.DOTALL)
+
+def dbg_search_memory_api(pattern, start_ea=None, end_ea=None, max_results=50):
+    """Search live process memory for hex pattern (with ?? wildcards) or string."""
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise ValueError("pattern must be a non-empty string")
+    max_results = bounded_int(max_results, 'max_results', 1, 500)
+    compiled = _compile_wildcard_bytes(pattern)
+    def _inner():
+        import ida_dbg, ida_idd
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        scan_ranges = []
+        if start_ea is not None and end_ea is not None and end_ea > start_ea:
+            scan_ranges.append((start_ea, min(end_ea, start_ea + 64 * 1024 * 1024)))
+        else:
+            mmap = dbg_get_memory_map().get("regions", [])
+            for reg in mmap:
+                if 'r' not in reg.get("perm", ""):
+                    continue
+                s = int(reg["start"], 16)
+                e = int(reg["end"], 16)
+                if start_ea is not None and e <= start_ea:
+                    continue
+                if end_ea is not None and s >= end_ea:
+                    continue
+                s = max(s, start_ea) if start_ea is not None else s
+                e = min(e, end_ea) if end_ea is not None else e
+                if 0 < e - s <= 16 * 1024 * 1024:
+                    scan_ranges.append((s, e))
+        matches = []
+        chunk_size = 256 * 1024
+        for r_start, r_end in scan_ranges:
+            cur = r_start
+            while cur < r_end and len(matches) < max_results:
+                read_len = min(chunk_size, r_end - cur)
+                buf = ida_idd.dbg_read_memory(cur, read_len)
+                if buf:
+                    for m in compiled.finditer(buf):
+                        hit_ea = cur + m.start()
+                        func = ida_funcs.get_func(hit_ea)
+                        matches.append({
+                            "ea": hex(hit_ea),
+                            "bytes": buf[m.start():m.end()].hex().upper(),
+                            "func": ida_funcs.get_func_name(func.start_ea) if func else None,
+                        })
+                        if len(matches) >= max_results:
+                            break
+                cur += read_len
+        return {"pattern": pattern, "results": matches, "count": len(matches)}
+    return safe_read(_inner)
 
 def dbg_get_threads():
     def _inner():
         import ida_dbg
         threads = []
+        cur_tid = ida_dbg.get_current_thread() if hasattr(ida_dbg, 'get_current_thread') else None
         for i in range(ida_dbg.get_thread_qty()):
             tid = ida_dbg.getn_thread(i)
-            name = ida_dbg.get_thread_name(tid)
-            threads.append({"tid":tid,"name":name or ""})
-        return {"threads":threads,"count":len(threads)}
+            # IDA 9.5 uses getn_thread_name(i) instead of removed get_thread_name(tid)
+            if hasattr(ida_dbg, 'getn_thread_name'):
+                name = ida_dbg.getn_thread_name(i)
+            elif hasattr(ida_dbg, 'get_thread_name'):
+                name = ida_dbg.get_thread_name(tid)
+            else:
+                name = ""
+            threads.append({"tid": tid, "name": name or "", "is_current": tid == cur_tid})
+        return {"threads": threads, "current_tid": cur_tid, "count": len(threads)}
     return safe_read(_inner)
+
+def dbg_thread_control(tid, action="select"):
+    """Select, suspend, or resume a thread by TID."""
+    tid = bounded_int(tid, 'tid', 0, 2 ** 31 - 1)
+    act = (action or "").strip().lower()
+    if act not in ("select", "suspend", "resume"):
+        raise ValueError("action must be 'select', 'suspend', or 'resume'")
+    def _inner():
+        import ida_dbg
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        if act == "select":
+            ok = bool(ida_dbg.select_thread(tid))
+        elif act == "suspend":
+            ok = ida_dbg.suspend_thread(tid) >= 0
+        else:
+            ok = ida_dbg.resume_thread(tid) >= 0
+        return {"success": ok, "tid": tid, "action": act}
+    return safe_write(_inner)
 
 def dbg_get_stack():
     def _inner():
@@ -1844,13 +3215,278 @@ def dbg_get_stack():
             return {"error": "No active debugger"}
         trace = ida_idd.call_stack_t()
         ok = ida_dbg.collect_stack_trace(ida_dbg.get_current_thread(), trace)
-        if not ok: return {"error":"Cannot get call stack"}
+        if not ok:
+            return {"error": "Cannot get call stack"}
         frames = []
         for i in range(len(trace)):
             f = trace[i]
-            frames.append({"caller":hex(f.callea),"func":hex(f.funcea),"fp":hex(f.fp)})
-        return {"stack":frames,"count":len(frames)}
+            func = ida_funcs.get_func(f.funcea) if f.funcea != ida_idaapi.BADADDR else None
+            func_name = ida_funcs.get_func_name(func.start_ea) if func else (ida_name.get_name(f.callea) or None)
+            mod_name = None
+            if hasattr(ida_idd, 'modinfo_t') and hasattr(ida_dbg, 'get_module_info'):
+                mi = ida_idd.modinfo_t()
+                if ida_dbg.get_module_info(f.callea, mi):
+                    mod_name = os.path.basename(mi.name) if mi.name else None
+            frames.append({
+                "index": i,
+                "caller": hex(f.callea),
+                "func": hex(f.funcea),
+                "func_name": func_name,
+                "module": mod_name,
+                "fp": hex(f.fp),
+            })
+        return {"stack": frames, "count": len(frames)}
     return safe_read(_inner)
+
+def dbg_configure_trace_api(mode=None, enabled=True, trace_size=None, options=None, insn=None, func=None, bblk=None, step=None, buf_size=None):
+    """Enable/disable execution tracing (insn, func, bblk, step)."""
+    if buf_size is not None and trace_size is None:
+        trace_size = buf_size
+    if trace_size is not None:
+        trace_size = bounded_int(trace_size, 'trace_size', 0, 1000000)
+    def _inner():
+        import ida_dbg
+        if trace_size is not None and hasattr(ida_dbg, 'set_trace_size'):
+            ida_dbg.set_trace_size(trace_size)
+        # Support multi-flag dict-style calls (insn=..., func=..., bblk=..., step=...)
+        if any(v is not None for v in (insn, func, bblk, step)):
+            if insn is not None:
+                if insn and hasattr(ida_dbg, 'enable_insn_trace'):
+                    ida_dbg.enable_insn_trace(True)
+                elif not insn and hasattr(ida_dbg, 'disable_insn_trace'):
+                    ida_dbg.disable_insn_trace()
+            if func is not None:
+                if func and hasattr(ida_dbg, 'enable_func_trace'):
+                    ida_dbg.enable_func_trace(True)
+                elif not func and hasattr(ida_dbg, 'disable_func_trace'):
+                    ida_dbg.disable_func_trace()
+            if bblk is not None:
+                if bblk and hasattr(ida_dbg, 'enable_bblk_trace'):
+                    ida_dbg.enable_bblk_trace(True)
+                elif not bblk and hasattr(ida_dbg, 'disable_bblk_trace'):
+                    ida_dbg.disable_bblk_trace()
+            if step is not None:
+                if step and hasattr(ida_dbg, 'enable_step_trace'):
+                    ida_dbg.enable_step_trace(1)
+                elif not step and hasattr(ida_dbg, 'disable_step_trace'):
+                    ida_dbg.disable_step_trace()
+            return {
+                "success": True,
+                "insn_trace": bool(ida_dbg.is_insn_trace_enabled()) if hasattr(ida_dbg, 'is_insn_trace_enabled') else bool(insn),
+                "func_trace": bool(ida_dbg.is_func_trace_enabled()) if hasattr(ida_dbg, 'is_func_trace_enabled') else bool(func),
+                "bblk_trace": bool(ida_dbg.is_bblk_trace_enabled()) if hasattr(ida_dbg, 'is_bblk_trace_enabled') else bool(bblk),
+                "step_trace": bool(ida_dbg.is_step_trace_enabled()) if hasattr(ida_dbg, 'is_step_trace_enabled') else bool(step),
+                "trace_size": trace_size,
+            }
+        mode_norm = (mode or "insn").strip().lower()
+        if mode_norm not in ("insn", "func", "bblk", "step"):
+            raise ValueError("mode must be 'insn', 'func', 'bblk', or 'step'")
+        ok = False
+        if mode_norm == "insn":
+            if enabled and hasattr(ida_dbg, 'enable_insn_trace'):
+                ok = bool(ida_dbg.enable_insn_trace(True))
+            elif not enabled and hasattr(ida_dbg, 'disable_insn_trace'):
+                ok = bool(ida_dbg.disable_insn_trace())
+            if options is not None and hasattr(ida_dbg, 'set_insn_trace_options'):
+                ida_dbg.set_insn_trace_options(int(options))
+        elif mode_norm == "func":
+            if enabled and hasattr(ida_dbg, 'enable_func_trace'):
+                ok = bool(ida_dbg.enable_func_trace(True))
+            elif not enabled and hasattr(ida_dbg, 'disable_func_trace'):
+                ok = bool(ida_dbg.disable_func_trace())
+            if options is not None and hasattr(ida_dbg, 'set_func_trace_options'):
+                ida_dbg.set_func_trace_options(int(options))
+        elif mode_norm == "bblk":
+            if enabled and hasattr(ida_dbg, 'enable_bblk_trace'):
+                ok = bool(ida_dbg.enable_bblk_trace(True))
+            elif not enabled and hasattr(ida_dbg, 'disable_bblk_trace'):
+                ok = bool(ida_dbg.disable_bblk_trace())
+            if options is not None and hasattr(ida_dbg, 'set_bblk_trace_options'):
+                ida_dbg.set_bblk_trace_options(int(options))
+        elif mode_norm == "step":
+            if enabled and hasattr(ida_dbg, 'enable_step_trace'):
+                ok = bool(ida_dbg.enable_step_trace(1))
+            elif not enabled and hasattr(ida_dbg, 'disable_step_trace'):
+                ok = bool(ida_dbg.disable_step_trace())
+            if options is not None and hasattr(ida_dbg, 'set_step_trace_options'):
+                ida_dbg.set_step_trace_options(int(options))
+        return {"success": ok, "mode": mode_norm, "enabled": bool(enabled), "trace_size": trace_size}
+    return safe_write(_inner)
+
+def dbg_get_trace_events(offset=0, limit=200, count=None):
+    """Retrieve recorded trace events from IDA's trace buffer."""
+    if count is not None:
+        limit = count
+    offset = bounded_int(offset, 'offset', 0, 2 ** 31 - 1)
+    limit = bounded_int(limit, 'limit', 1, 2000)
+    def _inner():
+        import ida_dbg
+        qty = int(ida_dbg.get_tev_qty()) if hasattr(ida_dbg, 'get_tev_qty') else 0
+        tev_names = {
+            getattr(ida_dbg, 'tev_none', 0): "none",
+            getattr(ida_dbg, 'tev_insn', 1): "insn",
+            getattr(ida_dbg, 'tev_call', 2): "call",
+            getattr(ida_dbg, 'tev_ret', 3): "ret",
+            getattr(ida_dbg, 'tev_bpt', 4): "bpt",
+            getattr(ida_dbg, 'tev_mem', 5): "mem",
+            getattr(ida_dbg, 'tev_event', 6): "event",
+        }
+        events = []
+        for idx in range(offset, min(qty, offset + limit)):
+            ti = ida_dbg.tev_info_t()
+            if ida_dbg.get_tev_info(idx, ti):
+                tname = tev_names.get(ti.type, f"tev_{ti.type}")
+                func = ida_funcs.get_func(ti.ea) if ti.ea != ida_idaapi.BADADDR else None
+                item = {
+                    "index": idx,
+                    "type": tname,
+                    "tid": int(ti.tid),
+                    "ea": hex(ti.ea) if ti.ea != ida_idaapi.BADADDR else None,
+                    "func": ida_funcs.get_func_name(func.start_ea) if func else None,
+                    "disasm": idc.generate_disasm_line(ti.ea, 0) if ti.ea != ida_idaapi.BADADDR else None,
+                }
+                if tname == "call" and hasattr(ida_dbg, 'get_call_tev_callee'):
+                    callee = ida_dbg.get_call_tev_callee(idx)
+                    if callee != ida_idaapi.BADADDR:
+                        item["callee"] = hex(callee)
+                        item["callee_name"] = ida_funcs.get_func_name(callee) or ida_name.get_name(callee)
+                elif tname == "ret" and hasattr(ida_dbg, 'get_ret_tev_return'):
+                    ret_ea = ida_dbg.get_ret_tev_return(idx)
+                    if ret_ea != ida_idaapi.BADADDR:
+                        item["return_ea"] = hex(ret_ea)
+                elif tname == "bpt" and hasattr(ida_dbg, 'get_bpt_tev_ea'):
+                    bpt_ea = ida_dbg.get_bpt_tev_ea(idx)
+                    if bpt_ea != ida_idaapi.BADADDR:
+                        item["bpt_ea"] = hex(bpt_ea)
+                events.append(item)
+        return {"events": events, "offset": offset, "limit": limit, "returned": len(events), "total": qty}
+    return safe_read(_inner)
+
+def dbg_clear_trace_api():
+    def _inner():
+        import ida_dbg
+        if hasattr(ida_dbg, 'clear_trace'):
+            ida_dbg.clear_trace()
+        return {"success": True}
+    return safe_write(_inner)
+
+def dbg_get_exceptions_api():
+    """Retrieve debugger exception handling table."""
+    def _inner():
+        import ida_dbg
+        if not hasattr(ida_dbg, 'retrieve_exceptions'):
+            return {"exceptions": [], "count": 0}
+        vec = ida_dbg.retrieve_exceptions()
+        if not vec:
+            return {"exceptions": [], "count": 0}
+        excs = []
+        for e in vec:
+            excs.append({
+                "code": hex(e.code),
+                "code_int": int(e.code),
+                "name": e.name or "",
+                "desc": e.desc or "",
+                "flags": int(e.flags),
+                "break_on": bool(e.break_on()) if hasattr(e, 'break_on') else False,
+                "handle": bool(e.handle()) if hasattr(e, 'handle') else False,
+            })
+        return {"exceptions": excs, "count": len(excs)}
+    return safe_read(_inner)
+
+def dbg_configure_exception_api(code, name="", desc="", break_on=True, handle=False, msg=True, silent=False, Break=None, save_to_idb=True):
+    """Define or update how the debugger handles a specific exception code."""
+    if Break is not None:
+        break_on = bool(Break)
+    if isinstance(code, bool) or not isinstance(code, (int, str)):
+        raise ValueError("Exception code must be an int or hex string")
+    exc_code = int(code.strip(), 0) if isinstance(code, str) else int(code)
+    def _inner():
+        import ida_dbg, ida_idd
+        if not hasattr(ida_dbg, 'define_exception'):
+            return {"error": "define_exception is not available"}
+        flags = 0
+        if break_on:
+            flags |= getattr(ida_idd, 'EXC_BREAK', 1)
+        if handle:
+            flags |= getattr(ida_idd, 'EXC_HANDLE', 2)
+        if msg:
+            flags |= getattr(ida_idd, 'EXC_MSG', 4)
+        if silent:
+            flags |= getattr(ida_idd, 'EXC_SILENT', 8)
+        err = ida_dbg.define_exception(exc_code, str(name or f"EXC_{exc_code:X}"), str(desc or ""), flags)
+        if save_to_idb and hasattr(ida_dbg, 'store_exceptions'):
+            ida_dbg.store_exceptions()
+        return {"success": not err, "error": err or None, "code": hex(exc_code), "flags": flags}
+    return safe_write(_inner)
+
+def dbg_get_event_log(limit=100, event_type=None):
+    """Read captured asynchronous debugger events from DBG_Hooks."""
+    limit = bounded_int(limit, 'limit', 1, 500)
+    with _dbg_events_lock:
+        items = list(_dbg_events)
+    if event_type:
+        items = [e for e in items if e.get("event") == event_type]
+    items = items[-limit:]
+    return {"events": items, "count": len(items)}
+
+def dbg_clear_event_log():
+    with _dbg_events_lock:
+        _dbg_events.clear()
+    return {"success": True}
+
+def dbg_send_cmd_api(command):
+    """Send raw command to underlying debugger backend (WinDbg, GDB, Bochs)."""
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("command must be a non-empty string")
+    def _inner():
+        import ida_dbg
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        if not hasattr(ida_dbg, 'send_dbg_command'):
+            return {"error": "send_dbg_command is not supported"}
+        try:
+            out = ida_dbg.send_dbg_command(command)
+            return {"success": True, "command": command, "output": str(out) if out is not None else ""}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "command": command}
+    return safe_write(_inner)
+
+def dbg_appcall_api(func_target, args=None, proto=None, tid=None):
+    """Execute an IDA Appcall in the suspended process."""
+    if not func_target:
+        raise ValueError("func_target is required")
+    if args is not None and not isinstance(args, list):
+        raise ValueError("args must be a list")
+    def _inner():
+        import ida_dbg, ida_idd
+        if not ida_dbg.is_debugger_on():
+            return {"error": "No active debugger"}
+        if not hasattr(ida_idd, 'Appcall'):
+            return {"error": "Appcall is not available"}
+        try:
+            if tid is not None and hasattr(ida_dbg, 'select_thread'):
+                ida_dbg.select_thread(int(tid))
+            if isinstance(func_target, int) or (isinstance(func_target, str) and re.fullmatch(r'(?:0[xX])?[0-9a-fA-F]+', func_target.strip())):
+                ea = parse_ea(func_target)
+                if proto and hasattr(ida_idd.Appcall, 'proto'):
+                    target = ida_idd.Appcall.proto(ea, str(proto))
+                else:
+                    fn_name = ida_funcs.get_func_name(ea) or ida_name.get_name(ea)
+                    target = getattr(ida_idd.Appcall, fn_name) if fn_name else ida_idd.Appcall[ea]
+            else:
+                if proto and hasattr(ida_idd.Appcall, 'proto'):
+                    target = ida_idd.Appcall.proto(str(func_target), str(proto))
+                else:
+                    target = ida_idd.Appcall[str(func_target)]
+            ret = target(*(args or []))
+            if isinstance(ret, int):
+                ret_val = hex(ret)
+            else:
+                ret_val = str(ret)
+            return {"success": True, "target": str(func_target), "return_value": ret_val}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "target": str(func_target)}
+    return safe_write(_inner)
 
 # ─── Utility API ─────────────────────────────────────────────────────────────
 
@@ -1888,17 +3524,57 @@ def get_callees(ea):
 def get_strings_used(ea):
     def _inner():
         f = ida_funcs.get_func(ea)
-        if not f: return {"error":f"No function at {hex(ea)}"}
-        strings = []; cur = f.start_ea
+        if not f:
+            return {"error": f"No function at {hex(ea)}"}
+        strings = []
+        seen = set()
+        cur = f.start_ea
+        has_flags_api = hasattr(ida_bytes, 'get_flags')
         while cur < f.end_ea and cur != ida_idaapi.BADADDR:
             for xref in idautils.XrefsFrom(cur):
-                s = ida_bytes.get_strlit_contents(xref.to, -1, 0)
+                target = xref.to
+                if (target, cur) in seen:
+                    continue
+                is_str = False
+                if has_flags_api:
+                    flags = ida_bytes.get_flags(target)
+                    if hasattr(ida_bytes, 'is_code') and ida_bytes.is_code(flags):
+                        continue
+                    is_str = bool(hasattr(ida_bytes, 'is_strlit') and ida_bytes.is_strlit(flags))
+                    if not is_str:
+                        if getattr(xref, 'type', 0) in (16, 17, 18, 19, 20, 21):
+                            continue
+                        if ida_funcs.get_func(target) is not None:
+                            continue
+                        seg = ida_segment.getseg(target) if hasattr(ida_segment, 'getseg') else None
+                        if seg is not None and (getattr(seg, 'perm', 0) & getattr(ida_segment, 'SEGPERM_EXEC', 1)):
+                            continue
+                s = ida_bytes.get_strlit_contents(target, -1, 0)
                 if s:
-                    try: text = s.decode("utf-8", errors="replace")
-                    except: text = str(s)
-                    strings.append({"ea":hex(xref.to),"ref_from":hex(cur),"value":text})
+                    try:
+                        text = s.decode("utf-8", errors="replace")
+                    except Exception:
+                        text = str(s)
+                    if has_flags_api and not is_str:
+                        if len(text.strip()) < 2 or "\ufffd" in text:
+                            continue
+                        if not all((32 <= ord(ch) < 127) or ch in "\t\r\n" for ch in text):
+                            continue
+                    seen.add((target, cur))
+                    strings.append({
+                        "ea": hex(target),
+                        "module_rva": _format_module_rva_inner(target),
+                        "ref_from": hex(cur),
+                        "value": text,
+                    })
             cur = idc.next_head(cur, f.end_ea)
-        return {"ea":hex(ea),"name":ida_funcs.get_func_name(ea),"strings":strings,"count":len(strings)}
+        return {
+            "ea": hex(ea),
+            "module_rva": _format_module_rva_inner(ea),
+            "name": ida_funcs.get_func_name(ea),
+            "strings": strings,
+            "count": len(strings),
+        }
     return safe_read(_inner)
 
 def undo_action():
@@ -1934,28 +3610,150 @@ def get_selection_range():
         return {"selected":True,"start":hex(s),"end":hex(e),"size":e-s}
     return safe_read(_inner)
 
-def get_functions_paginated(offset=0, limit=500):
+def get_functions_paginated(offset=0, limit=500, filter_str=None, start_ea=None, end_ea=None):
     offset = bounded_int(offset, 'offset', 0, 2 ** 31 - 1)
-    limit = bounded_int(limit, 'limit', 1, MAX_FUNCTIONS)
+    limit = bounded_int(limit, 'limit', 1, 10000)
     def _inner():
-        funcs = []; count = 0; skip = 0
+        funcs = []
+        total = 0
+        pat = None
+        if filter_str:
+            try:
+                pat = re.compile(filter_str, re.IGNORECASE)
+            except re.error:
+                pat = None
+        filt_lower = filter_str.lower() if filter_str else None
         for ea in idautils.Functions():
-            if skip < offset: skip += 1; continue
-            if count >= limit: break
-            f = ida_funcs.get_func(ea)
-            funcs.append({"ea":hex(ea),"name":ida_funcs.get_func_name(ea),"size":f.size() if f else 0})
-            count += 1
-        total = sum(1 for _ in idautils.Functions())
-        return {"functions":funcs,"offset":offset,"limit":limit,"returned":count,"total":total}
+            if start_ea is not None and ea < start_ea:
+                continue
+            if end_ea is not None and ea >= end_ea:
+                continue
+            name = ida_funcs.get_func_name(ea) or ""
+            if filter_str:
+                if pat is not None:
+                    if not pat.search(name):
+                        continue
+                elif filt_lower not in name.lower():
+                    continue
+            if total >= offset and len(funcs) < limit:
+                f = ida_funcs.get_func(ea)
+                funcs.append({
+                    "ea": hex(ea),
+                    "module_rva": _format_module_rva_inner(ea),
+                    "name": name,
+                    "size": f.size() if f else 0,
+                })
+            total += 1
+        return {
+            "functions": funcs,
+            "offset": offset,
+            "limit": limit,
+            "returned": len(funcs),
+            "total": total,
+            "has_more": (offset + len(funcs)) < total,
+        }
     return safe_read(_inner)
 
 # ─── HTTP Request Handler ────────────────────────────────────────────────────
 
+def _resolve_symbolic_ea_inner(expr):
+    """Resolve 'module.dll+0xC3EA7', 'symbol+0x10', or 'symbol_name' inside IDA main thread."""
+    s = expr.strip()
+    m = re.match(r'^(.+?)\s*([+-])\s*(0[xX][0-9a-fA-F]+|[0-9a-fA-F]+)$', s)
+    if m:
+        base_str = m.group(1).strip()
+        sign = -1 if m.group(2) == '-' else 1
+        off_raw = m.group(3).strip()
+        offset = int(off_raw, 16) if off_raw.lower().startswith('0x') else int(off_raw, 16)
+    else:
+        base_str = s
+        sign = 1
+        offset = 0
+
+    base_lower = base_str.lower()
+    base_no_ext = os.path.splitext(base_lower)[0]
+    base_ea = None
+
+    # 1. Check active debugger modules first (handles runtime ASLR bases)
+    try:
+        import ida_dbg
+        if hasattr(ida_dbg, 'is_debugger_on') and ida_dbg.is_debugger_on():
+            if hasattr(ida_dbg, 'get_modules'):
+                for mod in ida_dbg.get_modules():
+                    mname = os.path.basename(getattr(mod, 'name', '') or "").lower()
+                    mfull = (getattr(mod, 'name', '') or "").lower()
+                    mnoext = os.path.splitext(mname)[0]
+                    if base_lower in (mname, mfull, mnoext) or (base_no_ext and base_no_ext == mnoext):
+                        if getattr(mod, 'base', ida_idaapi.BADADDR) != ida_idaapi.BADADDR:
+                            base_ea = int(mod.base)
+                            break
+            if base_ea is None:
+                import ida_idd
+                if hasattr(ida_idd, 'modinfo_t') and hasattr(ida_dbg, 'get_first_module'):
+                    mod = ida_idd.modinfo_t()
+                    ok = ida_dbg.get_first_module(mod)
+                    while ok:
+                        mname = os.path.basename(mod.name or "").lower()
+                        mfull = (mod.name or "").lower()
+                        mnoext = os.path.splitext(mname)[0]
+                        if base_lower in (mname, mfull, mnoext) or (base_no_ext and base_no_ext == mnoext):
+                            if mod.base != ida_idaapi.BADADDR:
+                                base_ea = int(mod.base)
+                                break
+                        ok = ida_dbg.get_next_module(mod)
+    except Exception:
+        pass
+
+    # 2. Check loaded root binary filename in IDB
+    if base_ea is None:
+        try:
+            root_fn = (ida_nalt.get_root_filename() or "").lower() if hasattr(ida_nalt, 'get_root_filename') else ""
+            root_no_ext = os.path.splitext(root_fn)[0]
+            if root_fn and (base_lower in (root_fn, root_no_ext) or (base_no_ext and base_no_ext == root_no_ext)):
+                img_base = ida_nalt.get_imagebase() if hasattr(ida_nalt, 'get_imagebase') else ida_idaapi.BADADDR
+                if not isinstance(img_base, int) or img_base == ida_idaapi.BADADDR or img_base == 0:
+                    import ida_ida
+                    img_base = ida_ida.inf_get_min_ea() if hasattr(ida_ida, 'inf_get_min_ea') else 0
+                base_ea = int(img_base)
+        except Exception:
+            pass
+
+    # 3. Check segment name
+    if base_ea is None and hasattr(ida_segment, 'get_segm_by_name'):
+        try:
+            seg = ida_segment.get_segm_by_name(base_str)
+            if seg is not None and seg.start_ea != ida_idaapi.BADADDR:
+                base_ea = int(seg.start_ea)
+        except Exception:
+            pass
+
+    # 4. Check symbol / function name
+    if base_ea is None and hasattr(ida_name, 'get_name_ea'):
+        try:
+            sym_ea = ida_name.get_name_ea(ida_idaapi.BADADDR, base_str)
+            if isinstance(sym_ea, int) and sym_ea != ida_idaapi.BADADDR:
+                base_ea = sym_ea
+        except Exception:
+            pass
+
+    if base_ea is None:
+        raise ValueError(f"Cannot resolve address or module+RVA expression: '{expr}'")
+    return base_ea + sign * offset
+
 def parse_ea(ea_str):
-    """Strings use hexadecimal notation; JSON integers are numeric addresses."""
+    """Parse hex address ('0x140001000'), integer, or 'module.dll+0xC3EA7' / 'symbol+0x10'."""
     if isinstance(ea_str, bool) or not isinstance(ea_str, (str, int)):
-        raise ValueError('Address must be a hexadecimal string or an integer')
-    value = int(ea_str.strip(), 16) if isinstance(ea_str, str) else ea_str
+        raise ValueError('Address must be a hexadecimal string, module+RVA expression, or an integer')
+    if isinstance(ea_str, int):
+        value = ea_str
+    else:
+        s = unquote(ea_str).strip()
+        if not s:
+            raise ValueError('Address must not be empty')
+        if re.fullmatch(r'(?:0[xX])?[0-9a-fA-F]+', s):
+            value = int(s, 16)
+        else:
+            value = safe_read(lambda: _resolve_symbolic_ea_inner(s))
     if not 0 <= value < ida_idaapi.BADADDR:
         raise ValueError('Address is outside the IDA address range')
     return value
@@ -1968,6 +3766,131 @@ def bounded_int(value, name, minimum, maximum):
     if not minimum <= result <= maximum:
         raise ValueError(f'{name} must be between {minimum} and {maximum}')
     return result
+
+
+def capture_evidence_api(ea=None, memory_ranges=None, output_path=None, stack_bytes=128):
+    """Capture a complete forensic/debugging JSON evidence bundle (module, hashes, addresses, registers, stack, memory)."""
+    stack_bytes = bounded_int(stack_bytes, 'stack_bytes', 0, 16384)
+    target_ea = parse_ea(ea) if ea is not None and str(ea).strip() != "" else None
+    parsed_ranges = []
+    if memory_ranges:
+        if not isinstance(memory_ranges, list):
+            raise ValueError("memory_ranges must be a list of {ea, size, label} objects")
+        for item in memory_ranges[:32]:
+            if isinstance(item, dict) and item.get("ea") is not None:
+                r_ea = parse_ea(item["ea"])
+                r_sz = bounded_int(item.get("size", 64), "range size", 1, 65536)
+                parsed_ranges.append((r_ea, r_sz, item.get("label") or str(item["ea"])))
+
+    def _inner():
+        info = get_info()
+        dbg_stat = dbg_get_status()
+        status = dbg_stat.get("status", "not_attached")
+        regs_data = dbg_get_regs(include_all=False) if status in ("paused", "breakpoint_hit") else {"status": status, "registers": {}}
+        stack_data = dbg_get_stack() if status in ("paused", "breakpoint_hit") else {"stack": [], "count": 0}
+        mods_data = dbg_get_modules() if status != "not_attached" else {"modules": [], "count": 0}
+        bps_data = dbg_list_bps()
+
+        focus_ea = target_ea
+        if focus_ea is None and dbg_stat.get("ip"):
+            try:
+                focus_ea = int(dbg_stat["ip"], 16)
+            except Exception:
+                focus_ea = None
+        if focus_ea is None:
+            try:
+                focus_ea = idc.get_screen_ea()
+            except Exception:
+                focus_ea = None
+
+        target_ctx = None
+        if focus_ea is not None and focus_ea != ida_idaapi.BADADDR:
+            func = ida_funcs.get_func(focus_ea) if hasattr(ida_funcs, 'get_func') else None
+            func_name = ida_funcs.get_func_name(func.start_ea) if func else None
+            disasm_preview = get_disasm_range(focus_ea, count=15).get("instructions", [])
+            pseudo = None
+            if func and HAS_HEXRAYS:
+                p_res = get_pseudocode(func.start_ea)
+                if not p_res.get("error"):
+                    pseudo = p_res.get("pseudocode")
+            target_ctx = {
+                "ea": hex(focus_ea),
+                "module_rva": _format_module_rva_inner(focus_ea),
+                "function": func_name,
+                "function_ea": hex(func.start_ea) if func else None,
+                "disasm": disasm_preview,
+                "pseudocode": pseudo,
+            }
+
+        raw_stack_dump = None
+        if status in ("paused", "breakpoint_hit") and stack_bytes > 0 and dbg_stat.get("sp"):
+            try:
+                sp_ea = int(dbg_stat["sp"], 16)
+                mem_res = dbg_read_mem(sp_ea, stack_bytes)
+                if not mem_res.get("error"):
+                    raw_stack_dump = mem_res
+            except Exception:
+                pass
+
+        mem_dumps = []
+        for r_ea, r_sz, r_label in parsed_ranges:
+            dump_item = {
+                "label": r_label,
+                "ea": hex(r_ea),
+                "module_rva": _format_module_rva_inner(r_ea),
+                "size": r_sz,
+            }
+            if status in ("paused", "breakpoint_hit"):
+                m_res = dbg_read_mem(r_ea, r_sz)
+                if not m_res.get("error"):
+                    dump_item["source"] = "debugger_memory"
+                    dump_item["hex"] = m_res.get("hex")
+                    dump_item["ascii"] = m_res.get("ascii")
+                else:
+                    b_res = read_bytes(r_ea, r_sz)
+                    dump_item["source"] = "idb_bytes"
+                    dump_item["hex"] = b_res.get("hex")
+                    dump_item["ascii"] = b_res.get("ascii")
+            else:
+                b_res = read_bytes(r_ea, r_sz)
+                dump_item["source"] = "idb_bytes"
+                dump_item["hex"] = b_res.get("hex")
+                dump_item["ascii"] = b_res.get("ascii")
+            mem_dumps.append(dump_item)
+
+        evidence = {
+            "timestamp": round(_time.time(), 3),
+            "bridge_version": BRIDGE_VERSION,
+            "ida_version": IDA_VERSION,
+            "binary": info,
+            "target": target_ctx,
+            "debugger": {
+                "status": status,
+                "current_tid": dbg_stat.get("current_tid"),
+                "ip": dbg_stat.get("ip"),
+                "ip_module_rva": dbg_stat.get("ip_module_rva"),
+                "sp": dbg_stat.get("sp"),
+                "registers": regs_data.get("registers", {}),
+                "stack_frames": stack_data.get("stack", []),
+                "stack_memory": raw_stack_dump,
+                "modules": mods_data.get("modules", []),
+                "breakpoints": bps_data.get("breakpoints", []),
+                "recent_events": dbg_get_event_log(limit=25).get("events", []),
+            },
+            "memory_ranges": mem_dumps,
+        }
+        return evidence
+
+    bundle = safe_read(_inner)
+    if output_path:
+        out_file = os.path.abspath(os.path.expanduser(str(output_path)))
+        out_dir = os.path.dirname(out_file)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(out_file, "w", encoding="utf-8") as fh:
+            json.dump(bundle, fh, indent=2, ensure_ascii=False)
+        bundle["saved_to"] = out_file
+    return bundle
 
 
 def get_analyze_context(ea):
@@ -2058,10 +3981,163 @@ class Ph4ntomUIHooks(ida_kernwin.UI_Hooks):
 
 try:
     import ida_dbg
-    class Ph4ntomDbgHooks(ida_dbg.DbgHooks):
+    _DbgHooksBase = getattr(ida_dbg, 'DBG_Hooks', getattr(ida_dbg, 'DbgHooks', object))
+    class Ph4ntomDbgHooks(_DbgHooksBase):
         def dbg_bpt(self, tid, ea):
-            _publish_event({"event": "breakpoint_hit", "tid": tid, "ea": hex(ea)})
+            global _last_dbg_stop_reason
+            _last_dbg_stop_reason = "breakpoint_hit"
+            pol = _bp_policies.get(ea)
+            mod_rva = None
+            try:
+                mod_rva = (pol.get("module_rva") if pol else None) or _format_module_rva_inner(ea)
+            except Exception:
+                pass
+            if pol is not None:
+                filter_tid = pol.get("tid")
+                if filter_tid is not None and int(filter_tid) != int(tid):
+                    _record_dbg_event({
+                        "event": "breakpoint_filtered",
+                        "tid": tid,
+                        "expected_tid": filter_tid,
+                        "ea": hex(ea),
+                        "module_rva": mod_rva,
+                    })
+                    try:
+                        _last_dbg_stop_reason = None
+                        if hasattr(ida_dbg, 'request_continue_process') and hasattr(ida_dbg, 'run_requests'):
+                            ida_dbg.request_continue_process()
+                            ida_dbg.run_requests()
+                        elif hasattr(ida_dbg, 'continue_process'):
+                            ida_dbg.continue_process()
+                    except Exception:
+                        pass
+                    return 0
+                pol["hit_count"] = int(pol.get("hit_count", 0)) + 1
+                hit_count = pol["hit_count"]
+                log_reg_names = pol.get("log_regs") or None
+                auto_cont = bool(pol.get("auto_continue") or pol.get("action") == "log_and_continue")
+            else:
+                hit_count = 1
+                log_reg_names = None
+                auto_cont = False
+
+            regs_snap = {}
+            try:
+                regs_snap = _read_regs_inner(ida_dbg, tid=tid, reg_names=log_reg_names)
+            except Exception:
+                pass
+            ev_payload = {
+                "event": "breakpoint_hit",
+                "status": "breakpoint_hit",
+                "tid": tid,
+                "ea": hex(ea),
+                "module_rva": mod_rva,
+                "hit_count": hit_count,
+                "registers": regs_snap,
+                "auto_continued": auto_cont,
+            }
+            _record_dbg_event(ev_payload)
+            if auto_cont:
+                try:
+                    _last_dbg_stop_reason = None
+                    if hasattr(ida_dbg, 'request_continue_process') and hasattr(ida_dbg, 'run_requests'):
+                        ida_dbg.request_continue_process()
+                        ida_dbg.run_requests()
+                    elif hasattr(ida_dbg, 'continue_process'):
+                        ida_dbg.continue_process()
+                except Exception:
+                    pass
             return 0
+
+        def dbg_exception(self, pid, tid, ea, exc_code, exc_can_cont, exc_ea, exc_info):
+            _record_dbg_event({
+                "event": "exception",
+                "pid": pid,
+                "tid": tid,
+                "ea": hex(ea),
+                "code": hex(exc_code),
+                "can_continue": bool(exc_can_cont),
+                "exc_ea": hex(exc_ea),
+                "info": str(exc_info),
+            })
+            return 0
+
+        def dbg_process_start(self, pid, tid, ea, modinfo_name, modinfo_base, modinfo_size):
+            _record_dbg_event({
+                "event": "process_start",
+                "pid": pid,
+                "tid": tid,
+                "ea": hex(ea),
+                "module": str(modinfo_name),
+                "base": hex(modinfo_base),
+                "size": modinfo_size,
+            })
+            return 0
+
+        def dbg_process_exit(self, pid, tid, ea, exit_code):
+            _record_dbg_event({"event": "process_exit", "pid": pid, "tid": tid, "ea": hex(ea), "exit_code": exit_code})
+            return 0
+
+        def dbg_process_attach(self, pid, tid, ea, modinfo_name, modinfo_base, modinfo_size):
+            _record_dbg_event({
+                "event": "process_attach",
+                "pid": pid,
+                "tid": tid,
+                "ea": hex(ea),
+                "module": str(modinfo_name),
+                "base": hex(modinfo_base),
+                "size": modinfo_size,
+            })
+            return 0
+
+        def dbg_process_detach(self, pid, tid, ea):
+            _record_dbg_event({"event": "process_detach", "pid": pid, "tid": tid, "ea": hex(ea)})
+            return 0
+
+        def dbg_suspend_process(self):
+            _record_dbg_event({"event": "process_suspended"})
+            return 0
+
+        def dbg_thread_start(self, pid, tid, ea):
+            _record_dbg_event({"event": "thread_start", "pid": pid, "tid": tid, "ea": hex(ea)})
+            return 0
+
+        def dbg_thread_exit(self, pid, tid, ea, exit_code):
+            _record_dbg_event({"event": "thread_exit", "pid": pid, "tid": tid, "ea": hex(ea), "exit_code": exit_code})
+            return 0
+
+        def dbg_library_load(self, pid, tid, ea, modinfo_name, modinfo_base, modinfo_size):
+            _record_dbg_event({
+                "event": "library_load",
+                "pid": pid,
+                "tid": tid,
+                "ea": hex(ea),
+                "module": str(modinfo_name),
+                "base": hex(modinfo_base),
+                "size": modinfo_size,
+            })
+            return 0
+
+        def dbg_library_unload(self, pid, tid, ea, info):
+            _record_dbg_event({"event": "library_unload", "pid": pid, "tid": tid, "ea": hex(ea), "module": str(info)})
+            return 0
+
+        def dbg_step_into(self):
+            _record_dbg_event({"event": "step_into"})
+            return 0
+
+        def dbg_step_over(self):
+            _record_dbg_event({"event": "step_over"})
+            return 0
+
+        def dbg_step_until_ret(self):
+            _record_dbg_event({"event": "step_until_ret"})
+            return 0
+
+        def dbg_run_to(self, pid, tid, ea):
+            _record_dbg_event({"event": "run_to", "pid": pid, "tid": tid, "ea": hex(ea)})
+            return 0
+
     dbg_hooks = Ph4ntomDbgHooks()
 except Exception:
     dbg_hooks = None
@@ -2074,12 +4150,25 @@ def route_do_get_0(self, match, params):
 
 @get_route(r'/api/functions')
 def route_do_get_1(self, match, params):
-    self.send_json(get_functions())
+    filt = params.get('filter', [None])[0]
+    start_raw = params.get('start', [None])[0]
+    end_raw = params.get('end', [None])[0]
+    start_ea = parse_ea(start_raw) if start_raw is not None else None
+    end_ea = parse_ea(end_raw) if end_raw is not None else None
+    self.send_json(get_functions(filter_str=filt, start_ea=start_ea, end_ea=end_ea))
 
 @get_route(r'/api/strings')
 def route_do_get_2(self, match, params):
     filt = params.get('filter', [None])[0]
-    self.send_json(get_strings(filt))
+    off_raw = params.get('offset', [None])[0]
+    lim_raw = params.get('limit', [None])[0]
+    start_raw = params.get('start', [None])[0]
+    end_raw = params.get('end', [None])[0]
+    offset = int(off_raw) if off_raw is not None else 0
+    limit = int(lim_raw) if lim_raw is not None else None
+    start_ea = parse_ea(start_raw) if start_raw is not None else None
+    end_ea = parse_ea(end_raw) if end_raw is not None else None
+    self.send_json(get_strings(filt, offset=offset, limit=limit, start_ea=start_ea, end_ea=end_ea))
 
 @get_route(r'/api/imports')
 def route_do_get_3(self, match, params):
@@ -2104,7 +4193,15 @@ def route_do_get_7(self, match, params):
 @get_route(r'/api/names')
 def route_do_get_8(self, match, params):
     filt = params.get('filter', [None])[0]
-    self.send_json(get_names(filt))
+    off_raw = params.get('offset', [None])[0]
+    lim_raw = params.get('limit', [None])[0]
+    start_raw = params.get('start', [None])[0]
+    end_raw = params.get('end', [None])[0]
+    offset = int(off_raw) if off_raw is not None else 0
+    limit = int(lim_raw) if lim_raw is not None else None
+    start_ea = parse_ea(start_raw) if start_raw is not None else None
+    end_ea = parse_ea(end_raw) if end_raw is not None else None
+    self.send_json(get_names(filt, offset=offset, limit=limit, start_ea=start_ea, end_ea=end_ea))
 
 @get_route(r'/api/wait-analysis')
 def route_do_get_9(self, match, params):
@@ -2132,6 +4229,7 @@ def route_do_get_14(self, match, params):
         'status': 'ok',
         'server': 'ph4ntom-ida-bridge',
         'version': BRIDGE_VERSION,
+        'ida_version': IDA_VERSION,
         'auth_enabled': AUTH_ENABLED,
         'dynamic_exec_enabled': ALLOW_SCRIPT_EXECUTION,
         'header_import_enabled': bool(ALLOWED_IMPORT_ROOTS),
@@ -2158,7 +4256,8 @@ def route_do_get_16(self, match, params):
 def route_do_get_17(self, match, params):
     parts = match.string.split('/')
     if len(parts) == 4:
-        self.send_json(get_vtable(parse_ea(parts[3])))
+        max_ent = int(params.get('max', [64])[0])
+        self.send_json(get_vtable(parse_ea(parts[3]), max_entries=max_ent))
     else:
         self.send_error_json('Use /api/vtable/<ea>')
 
@@ -2197,11 +4296,28 @@ def route_do_get_21(self, match, params):
     if action == 'pseudocode':
         self.send_json(get_pseudocode(ea))
     elif action == 'disasm':
-        self.send_json(get_disasm(ea))
+        end_raw = params.get('end', [None])[0]
+        cnt_raw = params.get('count', [None])[0]
+        end_ea = parse_ea(end_raw) if end_raw is not None else None
+        cnt = int(cnt_raw) if cnt_raw is not None else None
+        self.send_json(get_disasm(ea, end_ea=end_ea, count=cnt))
     elif action == 'xrefs-to':
-        self.send_json(get_xrefs_to(ea))
+        exact = params.get('exact', ['0'])[0] in ('1', 'true', 'True')
+        filt = params.get('filter', [None])[0]
+        start_raw = params.get('start', [None])[0]
+        end_raw = params.get('end', [None])[0]
+        xtype = params.get('type', [None])[0]
+        start_ea = parse_ea(start_raw) if start_raw is not None else None
+        end_ea = parse_ea(end_raw) if end_raw is not None else None
+        self.send_json(get_xrefs_to(ea, exact=exact, filter_str=filt, start_ea=start_ea, end_ea=end_ea, xref_type=xtype))
     elif action == 'xrefs-from':
-        self.send_json(get_xrefs_from(ea))
+        filt = params.get('filter', [None])[0]
+        start_raw = params.get('start', [None])[0]
+        end_raw = params.get('end', [None])[0]
+        xtype = params.get('type', [None])[0]
+        start_ea = parse_ea(start_raw) if start_raw is not None else None
+        end_ea = parse_ea(end_raw) if end_raw is not None else None
+        self.send_json(get_xrefs_from(ea, filter_str=filt, start_ea=start_ea, end_ea=end_ea, xref_type=xtype))
     elif action == 'details':
         self.send_json(get_func_details(ea))
     elif action == 'call-graph':
@@ -2261,7 +4377,21 @@ def route_do_get_26(self, match, params):
 def route_do_get_27(self, match, params):
     off = int(params.get('offset', [0])[0])
     lim = int(params.get('limit', [500])[0])
-    self.send_json(get_functions_paginated(off, lim))
+    filt = params.get('filter', [None])[0]
+    start_raw = params.get('start', [None])[0]
+    end_raw = params.get('end', [None])[0]
+    start_ea = parse_ea(start_raw) if start_raw is not None else None
+    end_ea = parse_ea(end_raw) if end_raw is not None else None
+    self.send_json(get_functions_paginated(off, lim, filter_str=filt, start_ea=start_ea, end_ea=end_ea))
+
+@get_route(r'/api/disasm-range')
+def route_do_get_disasm_range(self, match, params):
+    start_raw = params.get('start', params.get('ea', ['0']))[0]
+    end_raw = params.get('end', [None])[0]
+    cnt_raw = params.get('count', [100])[0]
+    start_ea = parse_ea(start_raw)
+    end_ea = parse_ea(end_raw) if end_raw is not None else None
+    self.send_json(get_disasm_range(start_ea, end_ea=end_ea, count=int(cnt_raw)))
 
 @get_route(r'/api/dbg/breakpoints')
 def route_do_get_28(self, match, params):
@@ -2269,7 +4399,10 @@ def route_do_get_28(self, match, params):
 
 @get_route(r'/api/dbg/regs')
 def route_do_get_29(self, match, params):
-    self.send_json(dbg_get_regs())
+    tid_raw = params.get('tid', [None])[0]
+    tid = int(tid_raw) if tid_raw is not None else None
+    inc_all = params.get('all', ['0'])[0] in ('1', 'true', 'True')
+    self.send_json(dbg_get_regs(tid=tid, include_all=inc_all))
 
 @get_route(r'/api/dbg/threads')
 def route_do_get_30(self, match, params):
@@ -2326,6 +4459,69 @@ def route_do_get_37(self, match, params):
         self.send_json(get_code_xrefs(parse_ea(parts[3])))
     else:
         self.send_error_json('Use /api/code-xrefs/<ea>')
+
+@get_route(r'/api/classes')
+def route_do_get_classes(self, match, params):
+    self.send_json(get_classes_api())
+
+@get_route(r'/api/class/.*')
+def route_do_get_class_details(self, match, params):
+    parts = match.string.split('/', 4)
+    if len(parts) == 4:
+        self.send_json(get_class_details_api(unquote(parts[3])))
+    else:
+        self.send_error_json('Use /api/class/<name>')
+
+@get_route(r'/api/decompiler/timeout')
+def route_do_get_decomp_timeout(self, match, params):
+    self.send_json(get_decompiler_timeout_api())
+
+@get_route(r'/api/dbg/status')
+def route_do_get_dbg_status(self, match, params):
+    self.send_json(dbg_get_status())
+
+@get_route(r'/api/dbg/processes')
+def route_do_get_dbg_processes(self, match, params):
+    self.send_json(dbg_list_processes())
+
+@get_route(r'/api/dbg/modules')
+def route_do_get_dbg_modules(self, match, params):
+    self.send_json(dbg_get_modules())
+
+@get_route(r'/api/dbg/memory-map')
+def route_do_get_dbg_memory_map(self, match, params):
+    self.send_json(dbg_get_memory_map())
+
+@get_route(r'/api/dbg/trace')
+def route_do_get_dbg_trace(self, match, params):
+    count = int(params.get('count', [50])[0])
+    offset = int(params.get('offset', [0])[0])
+    self.send_json(dbg_get_trace_events(count=count, offset=offset))
+
+@get_route(r'/api/dbg/exceptions')
+def route_do_get_dbg_exceptions(self, match, params):
+    self.send_json(dbg_get_exceptions_api())
+
+@get_route(r'/api/dbg/events')
+def route_do_get_dbg_events(self, match, params):
+    limit = int(params.get('limit', [50])[0])
+    etype = params.get('type', [None])[0]
+    self.send_json(dbg_get_event_log(limit=limit, event_type=etype))
+
+@get_route(r'/api/dbg/breakpoints/export')
+def route_do_get_dbg_bps_export(self, match, params):
+    out_path = params.get('output', [None])[0]
+    self.send_json(dbg_export_bps(output_path=out_path))
+
+@get_route(r'/api/dbg/evidence')
+def route_do_get_dbg_evidence(self, match, params):
+    ea_raw = params.get('ea', [None])[0]
+    out_path = params.get('output', [None])[0]
+    self.send_json(capture_evidence_api(ea=ea_raw, output_path=out_path))
+
+@get_route(r'/api/instances')
+def route_do_get_instances(self, match, params):
+    self.send_json(list_instances_api())
 
 @get_route(r'/api/schema')
 def route_do_get_39(self, match, params):
@@ -2445,7 +4641,14 @@ def route_do_post_9(self, match, data):
 @post_route(r'/api/decompile-batch')
 def route_do_post_10(self, match, data):
     ea_list = [parse_ea(e) for e in data.get('addresses', [])]
-    self.send_json(decompile_batch(ea_list))
+    out_path = data.get('output_path') or data.get('output')
+    fmt = data.get('format', 'json')
+    self.send_json(decompile_batch(ea_list, output_path=out_path, fmt=fmt))
+
+@post_route(r'/api/vtable/create-struct')
+def route_do_post_vtable_create_struct(self, match, data):
+    ea = parse_ea(data.get('ea', '0'))
+    self.send_json(create_vtable_struct_api(ea, name=data.get('name'), max_entries=data.get('max_entries', 64)))
 
 @post_route(r'/api/patch-bytes')
 def route_do_post_11(self, match, data):
@@ -2582,7 +4785,30 @@ def route_do_post_36(self, match, data):
 
 @post_route(r'/api/dbg/breakpoint')
 def route_do_post_37(self, match, data):
-    self.send_json(dbg_set_bp(parse_ea(data.get('ea', '0')), data.get('hardware', False)))
+    target_ea = parse_ea(data.get('ea', '0'))
+    act = str(data.get('action') or '').strip().lower()
+    mode_val = str(data.get('mode') or 'exec').strip().lower()
+    if data.get('delete') or act == 'delete' or mode_val == 'delete':
+        self.send_json(dbg_del_bp(target_ea))
+        return
+    if act in ('disable', 'enable'):
+        self.send_json(dbg_toggle_bp(target_ea, enable=(act == 'enable')))
+        return
+    self.send_json(dbg_set_bp(
+        target_ea,
+        hardware=data.get('hardware', False),
+        mode=data.get('mode', 'exec'),
+        size=data.get('size', 1),
+        condition=data.get('condition', ''),
+        elang=data.get('elang', 'Python'),
+        pass_count=data.get('pass_count', 0),
+        trace_only=data.get('trace_only', False),
+        enabled=data.get('enabled', True),
+        tid=data.get('tid'),
+        action=data.get('action'),
+        auto_continue=data.get('auto_continue', False),
+        log_regs=data.get('log_regs'),
+    ))
 
 @post_route(r'/api/dbg/del-breakpoint')
 def route_do_post_38(self, match, data):
@@ -2590,15 +4816,15 @@ def route_do_post_38(self, match, data):
 
 @post_route(r'/api/dbg/step-into')
 def route_do_post_39(self, match, data):
-    self.send_json(dbg_step_into_api())
+    self.send_json(dbg_step_into_api(wait=data.get('wait', False), timeout=data.get('timeout', 5)))
 
 @post_route(r'/api/dbg/step-over')
 def route_do_post_40(self, match, data):
-    self.send_json(dbg_step_over_api())
+    self.send_json(dbg_step_over_api(wait=data.get('wait', False), timeout=data.get('timeout', 5)))
 
 @post_route(r'/api/dbg/continue')
 def route_do_post_41(self, match, data):
-    self.send_json(dbg_continue_api())
+    self.send_json(dbg_continue_api(wait=data.get('wait', False), timeout=data.get('timeout', 5)))
 
 @post_route(r'/api/dbg/pause')
 def route_do_post_42(self, match, data):
@@ -2607,6 +4833,184 @@ def route_do_post_42(self, match, data):
 @post_route(r'/api/dbg/write-memory')
 def route_do_post_43(self, match, data):
     self.send_json(dbg_write_mem(parse_ea(data.get('ea', '0')), data.get('bytes', '')))
+
+@post_route(r'/api/decompiler/timeout')
+def route_do_post_decomp_timeout(self, match, data):
+    self.send_json(set_decompiler_timeout_api(data.get('seconds', 0)))
+
+@post_route(r'/api/dbg/load')
+def route_do_post_dbg_load(self, match, data):
+    self.send_json(dbg_load_backend(
+        data.get('name', ''),
+        use_remote=data.get('remote', False),
+        hostname=data.get('host', ''),
+        port=data.get('port', 0),
+        password=data.get('password', ''),
+    ))
+
+@post_route(r'/api/dbg/exit')
+def route_do_post_dbg_exit(self, match, data):
+    self.send_json(dbg_exit_process())
+
+@post_route(r'/api/dbg/step-out')
+def route_do_post_dbg_step_out(self, match, data):
+    self.send_json(dbg_step_out_api(wait=data.get('wait', False), timeout=data.get('timeout', 5)))
+
+@post_route(r'/api/dbg/run-to')
+def route_do_post_dbg_run_to(self, match, data):
+    self.send_json(dbg_run_to_api(
+        parse_ea(data.get('ea', '0')),
+        pid=data.get('pid', -1),
+        tid=data.get('tid', 0),
+        wait=data.get('wait', False),
+        timeout=data.get('timeout', 5),
+    ))
+
+@post_route(r'/api/dbg/wait')
+def route_do_post_dbg_wait(self, match, data):
+    self.send_json(dbg_wait_event(timeout=data.get('timeout', 5), wfne=data.get('wfne', 1)))
+
+@post_route(r'/api/dbg/set-reg')
+def route_do_post_dbg_set_reg(self, match, data):
+    reg_name = data.get('reg') or data.get('name') or ''
+    self.send_json(dbg_set_reg(reg_name, data.get('value', 0), tid=data.get('tid')))
+
+@post_route(r'/api/dbg/watchpoint')
+def route_do_post_dbg_watchpoint(self, match, data):
+    self.send_json(dbg_set_bp(
+        parse_ea(data.get('ea', '0')),
+        hardware=True,
+        mode=data.get('mode', 'rw'),
+        size=data.get('size', 4),
+        condition=data.get('condition', ''),
+        elang=data.get('elang', 'Python'),
+        pass_count=data.get('pass_count', 0),
+        trace_only=data.get('trace_only', False),
+        enabled=data.get('enabled', True),
+        tid=data.get('tid'),
+        action=data.get('action'),
+        auto_continue=data.get('auto_continue', False),
+        log_regs=data.get('log_regs'),
+    ))
+
+@post_route(r'/api/dbg/toggle-breakpoint')
+def route_do_post_dbg_toggle_bp(self, match, data):
+    self.send_json(dbg_toggle_bp(parse_ea(data.get('ea', '0')), enable=data.get('enable', data.get('enabled', True))))
+
+@post_route(r'/api/dbg/update-breakpoint')
+def route_do_post_dbg_update_bp(self, match, data):
+    self.send_json(dbg_update_bp(
+        parse_ea(data.get('ea', '0')),
+        condition=data.get('condition'),
+        elang=data.get('elang'),
+        pass_count=data.get('pass_count'),
+        trace_only=data.get('trace_only'),
+        enabled=data.get('enabled'),
+        mode=data.get('mode'),
+        size=data.get('size'),
+        tid=data.get('tid'),
+        action=data.get('action'),
+        auto_continue=data.get('auto_continue'),
+        log_regs=data.get('log_regs'),
+    ))
+
+@post_route(r'/api/dbg/breakpoints/export')
+def route_do_post_dbg_bps_export(self, match, data):
+    self.send_json(dbg_export_bps(output_path=data.get('output_path') or data.get('output')))
+
+@post_route(r'/api/dbg/breakpoints/import')
+def route_do_post_dbg_bps_import(self, match, data):
+    self.send_json(dbg_import_bps(
+        breakpoints=data.get('breakpoints', []),
+        input_path=data.get('input_path') or data.get('path'),
+        clear_existing=data.get('clear_existing', False),
+    ))
+
+@post_route(r'/api/dbg/evidence')
+def route_do_post_dbg_evidence(self, match, data):
+    self.send_json(capture_evidence_api(
+        ea=data.get('ea'),
+        memory_ranges=data.get('memory_ranges'),
+        output_path=data.get('output_path') or data.get('output'),
+        stack_bytes=data.get('stack_bytes', 128),
+    ))
+
+@post_route(r'/api/dbg/refresh-memory')
+def route_do_post_dbg_refresh_mem(self, match, data):
+    self.send_json(dbg_refresh_memory_api())
+
+@post_route(r'/api/dbg/search-memory')
+def route_do_post_dbg_search_mem(self, match, data):
+    start_raw = data.get('start')
+    end_raw = data.get('end')
+    self.send_json(dbg_search_memory_api(
+        data.get('pattern', ''),
+        start_ea=parse_ea(start_raw) if start_raw is not None else None,
+        end_ea=parse_ea(end_raw) if end_raw is not None else None,
+        max_results=data.get('max_results', 100),
+    ))
+
+@post_route(r'/api/dbg/thread-action')
+def route_do_post_dbg_thread_action(self, match, data):
+    self.send_json(dbg_thread_control(data.get('tid', 0), data.get('action', 'select')))
+
+@post_route(r'/api/dbg/trace/configure')
+def route_do_post_dbg_trace_config(self, match, data):
+    self.send_json(dbg_configure_trace_api(
+        insn=data.get('insn'),
+        func=data.get('func'),
+        bblk=data.get('bblk'),
+        step=data.get('step'),
+        buf_size=data.get('buf_size'),
+    ))
+
+@post_route(r'/api/dbg/trace/clear')
+def route_do_post_dbg_trace_clear(self, match, data):
+    self.send_json(dbg_clear_trace_api())
+
+@post_route(r'/api/dbg/exceptions')
+def route_do_post_dbg_exceptions(self, match, data):
+    code_val = data.get('code', 0)
+    if isinstance(code_val, str):
+        code_val = int(code_val, 0)
+    self.send_json(dbg_configure_exception_api(
+        code_val,
+        name=data.get('name'),
+        desc=data.get('desc'),
+        Break=data.get('break'),
+        handle=data.get('handle'),
+        msg=data.get('msg'),
+        save_to_idb=data.get('save', True),
+    ))
+
+@post_route(r'/api/dbg/events/clear')
+def route_do_post_dbg_events_clear(self, match, data):
+    self.send_json(dbg_clear_event_log())
+
+@post_route(r'/api/dbg/cmd')
+def route_do_post_dbg_cmd(self, match, data):
+    if not ALLOW_SCRIPT_EXECUTION:
+        self.send_error_json(
+            "Debugger backend command execution requires IDA_BRIDGE_ALLOW_EXEC=1 before starting IDA.",
+            403,
+        )
+        return
+    self.send_json(dbg_send_cmd_api(data.get('cmd', '')))
+
+@post_route(r'/api/dbg/appcall')
+def route_do_post_dbg_appcall(self, match, data):
+    if not ALLOW_SCRIPT_EXECUTION:
+        self.send_error_json(
+            "Appcall execution in target process requires IDA_BRIDGE_ALLOW_EXEC=1 before starting IDA.",
+            403,
+        )
+        return
+    self.send_json(dbg_appcall_api(
+        parse_ea(data.get('ea', '0')),
+        proto=data.get('proto', ''),
+        args=data.get('args', []),
+        tid=data.get('tid'),
+    ))
 
 @get_route(r'/api/events')
 def route_events(self, match, params):
@@ -2822,7 +5226,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         try:
             self.auth_token = secrets.token_hex(32)
-            self.token_path = _write_secure_token(self.auth_token)
+            self.token_path = _write_secure_token(self.auth_token, port=address[1])
             AUTH_TOKEN, _token_path = self.auth_token, self.token_path
         except Exception:
             self.server_close()
@@ -2854,6 +5258,82 @@ _thread = None
 _hooks_active = False
 
 
+def _instances_registry_path():
+    return os.path.join(os.path.expanduser("~"), ".ph4ntom_ida_instances.json")
+
+
+def _register_instance(host, port, token_path):
+    try:
+        reg_path = _instances_registry_path()
+        entries = {}
+        if os.path.isfile(reg_path):
+            try:
+                with open(reg_path, "r", encoding="utf-8") as fh:
+                    entries = json.load(fh) or {}
+            except Exception:
+                entries = {}
+        info = get_info()
+        entries[str(port)] = {
+            "port": int(port),
+            "url": f"http://{host}:{port}",
+            "pid": os.getpid(),
+            "filename": info.get("filename"),
+            "filepath": info.get("filepath"),
+            "token_path": token_path,
+            "version": BRIDGE_VERSION,
+            "ida_version": IDA_VERSION,
+            "started_at": round(_time.time(), 3),
+        }
+        with open(reg_path, "w", encoding="utf-8") as fh:
+            json.dump(entries, fh, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _unregister_instance(port):
+    try:
+        reg_path = _instances_registry_path()
+        if not os.path.isfile(reg_path):
+            return
+        with open(reg_path, "r", encoding="utf-8") as fh:
+            entries = json.load(fh) or {}
+        if str(port) in entries:
+            del entries[str(port)]
+            with open(reg_path, "w", encoding="utf-8") as fh:
+                json.dump(entries, fh, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def list_instances_api():
+    """Return all registered active IDA Bridge instances (e.g. networksystem.dll on 13370, tier0.dll on 13371)."""
+    reg_path = _instances_registry_path()
+    instances = []
+    if os.path.isfile(reg_path):
+        try:
+            with open(reg_path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh) or {}
+            for _, item in sorted(raw.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
+                if isinstance(item, dict):
+                    instances.append(item)
+        except Exception:
+            pass
+    cur_port = _server.server_port if _server is not None else PORT
+    if not any(i.get("port") == cur_port for i in instances):
+        info = get_info()
+        instances.append({
+            "port": cur_port,
+            "url": f"http://{HOST}:{cur_port}",
+            "pid": os.getpid(),
+            "filename": info.get("filename"),
+            "filepath": info.get("filepath"),
+            "token_path": _token_path,
+            "version": BRIDGE_VERSION,
+            "ida_version": IDA_VERSION,
+        })
+    return {"instances": instances, "current_port": cur_port, "count": len(instances)}
+
+
 def _hook_events():
     global _hooks_active
     if _hooks_active:
@@ -2880,14 +5360,34 @@ def _unhook_events():
         _hooks_active = False
 
 def start_server(host=HOST, port=PORT):
-    """Start the HTTP server in a background thread."""
+    """Start the HTTP server in a background thread, auto-selecting next free port (13370..13389) if multiple IDA instances run."""
     global _server, _thread
     if _server is not None:
-        print(f"[ph4ntom] Server already running on {host}:{port}")
+        print(f"[ph4ntom] Server already running on {host}:{_server.server_port}")
         return
 
+    env_port = os.environ.get("IDA_BRIDGE_PORT")
+    if env_port:
+        candidate_ports = [int(env_port)]
+    elif port == PORT:
+        candidate_ports = list(range(PORT, PORT + 20))
+    else:
+        candidate_ports = [port]
+
+    server = None
+    last_err = None
+    for cand_port in candidate_ports:
+        try:
+            server = BridgeHTTPServer((host, cand_port), BridgeHandler)
+            port = cand_port
+            break
+        except OSError as exc:
+            last_err = exc
+            continue
+    if server is None:
+        raise last_err or OSError(f"Could not bind to any port in {candidate_ports}")
+
     try:
-        server = BridgeHTTPServer((host, port), BridgeHandler)
         thread = threading.Thread(
             target=server.serve_forever,
             name="ph4ntom-ida-bridge",
@@ -2897,6 +5397,7 @@ def start_server(host=HOST, port=PORT):
         _hook_events()
         _server = server
         _thread = thread
+        _register_instance(host, port, _token_path)
     except Exception:
         try:
             if thread.is_alive():
@@ -2926,6 +5427,7 @@ def stop_server():
     _thread = None
 
     if server is not None:
+        _unregister_instance(server.server_port)
         server.shutdown()
         server.server_close()
     if thread is not None and thread is not threading.current_thread():

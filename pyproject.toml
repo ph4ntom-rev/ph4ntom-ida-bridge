@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ph4ntom-ida-bridge"
-version = "6.2.0"
-description = "Local REST, CLI, MCP, and agent bridge for IDA Pro"
+version = "6.3.0"
+description = "Local REST, CLI, MCP, and agent bridge for IDA Pro 9.5+"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

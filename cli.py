@@ -88,6 +88,43 @@ def find_ida(ida_dir: Optional[str] = None) -> str:
         found = shutil.which(name)
         if found:
             return found
+
+    if sys.platform == "win32":
+        roots = []
+        for env_name, fallback in (
+            ("ProgramFiles", r"C:\Program Files"),
+            ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        ):
+            raw = os.environ.get(env_name, fallback)
+            if raw:
+                roots.append(Path(raw))
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for pattern in ("IDA Professional *", "IDA Pro *", "IDA Free*", "IDA*"):
+                for match in sorted(root.glob(pattern), key=lambda p: p.name, reverse=True):
+                    if match.is_dir():
+                        found = find_in_directory(match)
+                        if found:
+                            return found
+    elif sys.platform == "darwin":
+        app_root = Path("/Applications")
+        if app_root.is_dir():
+            for pattern in ("IDA Professional *.app", "IDA Pro *.app", "IDA*.app"):
+                for match in sorted(app_root.glob(pattern), key=lambda p: p.name, reverse=True):
+                    macos_dir = match / "Contents" / "MacOS"
+                    if macos_dir.is_dir():
+                        found = find_in_directory(macos_dir)
+                        if found:
+                            return found
+    else:
+        for base in (Path("/opt"), Path.home()):
+            if base.is_dir():
+                for match in sorted(base.glob("ida*"), key=lambda p: p.name, reverse=True):
+                    if match.is_dir():
+                        found = find_in_directory(match)
+                        if found:
+                            return found
     return ""
 
 
@@ -95,9 +132,21 @@ def _plugin_directory(ida_executable: str) -> Path:
     return Path(ida_executable).resolve().parent / "plugins"
 
 
-def install_plugin(ida_executable: str, force: bool = False) -> Dict[str, Any]:
+def _user_plugin_directory() -> Path:
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "Hex-Rays" / "IDA Pro" / "plugins"
+    return Path.home() / ".idapro" / "plugins"
+
+
+def install_plugin(
+    ida_executable: str,
+    force: bool = False,
+    plugin_dir_override: Optional[Path] = None,
+) -> Dict[str, Any]:
     """Preflight, stage, back up, and replace the plugin/schema as one operation."""
-    plugin_dir = _plugin_directory(ida_executable)
+    plugin_dir = plugin_dir_override if plugin_dir_override is not None else _plugin_directory(ida_executable)
     installed = []
     unchanged = []
     pending = []
@@ -213,6 +262,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("exports", help="List exported symbols")
     sub.add_parser("schema", help="Return the complete REST API schema")
     sub.add_parser("doctor", help="Check runtime files and authenticated IDA connectivity")
+    sub.add_parser("classes", help="List decompiler language-neutral classes (IDA 9.5+)")
+    sub.add_parser("dbg-status", help="Show debugger status, IP/SP, active thread, and trace state")
+    sub.add_parser("dbg-regs", help="Show CPU registers and pointer telescoping")
+    sub.add_parser("dbg-bps", help="List breakpoints and watchpoints")
+    sub.add_parser("dbg-modules", help="List loaded modules in the debugged process")
+    sub.add_parser("dbg-memmap", help="Show live virtual memory map of the debugged process")
+    sub.add_parser("dbg-threads", help="List threads in the debugged process")
+    sub.add_parser("dbg-stack", help="Show call stack trace in the debugged process")
+    sub.add_parser("dbg-events", help="Show buffered debugger hook events")
+    sub.add_parser("instances", help="List all running IDA Pro bridge instances")
+
+    evidence = sub.add_parser("evidence", help="Capture reverse-engineering / debugger evidence to JSON")
+    evidence.add_argument("--ea", default="", help="Optional target address for function/disassembly context")
+    evidence.add_argument("--save", default="", help="Optional file path to save evidence JSON")
+    evidence.add_argument("--notes", default="", help="Optional analyst notes")
 
     functions = sub.add_parser("functions", help="List functions")
     functions.add_argument("--limit", type=int, default=None)
@@ -244,6 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     install = sub.add_parser("install-plugin", help="Install the plugin and API schema into IDA")
     install.add_argument("--ida-dir", help="IDA installation directory")
+    install.add_argument("--user", action="store_true", help="Install into the user IDA plugins directory ($IDAUSR/plugins)")
     install.add_argument("--force", action="store_true", help="Back up and replace differing files")
 
     launch = sub.add_parser("launch", help="Launch IDA with a binary")
@@ -273,6 +338,28 @@ def _dispatch(client: BridgeClient, args: argparse.Namespace) -> Dict[str, Any]:
         return client.get("/api/exports")
     if command == "schema":
         return client.get("/api/schema")
+    if command == "classes":
+        return client.classes()
+    if command == "dbg-status":
+        return client.dbg_status()
+    if command == "dbg-regs":
+        return client.dbg_regs()
+    if command == "dbg-bps":
+        return client.dbg_breakpoints()
+    if command == "dbg-modules":
+        return client.dbg_modules()
+    if command == "dbg-memmap":
+        return client.dbg_memory_map()
+    if command == "dbg-threads":
+        return client.dbg_threads()
+    if command == "dbg-stack":
+        return client.dbg_stack()
+    if command == "dbg-events":
+        return client.dbg_events()
+    if command == "instances":
+        return {"success": True, "active_url": client.base_url, "instances": client.list_instances()}
+    if command == "evidence":
+        return client.post("/api/dbg/evidence", {"ea": args.ea, "save_path": args.save, "notes": args.notes})
     if command == "functions":
         return client.functions(limit=args.limit, offset=args.offset)
     if command == "strings":
@@ -332,11 +419,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
     try:
         if args.command == "install-plugin":
-            ida_executable = find_ida(args.ida_dir)
-            if not ida_executable:
-                result = {"error": "IDA Pro not found. Pass --ida-dir or set IDA_DIR.", "success": False}
+            if getattr(args, "user", False):
+                result = install_plugin("", force=args.force, plugin_dir_override=_user_plugin_directory())
             else:
-                result = install_plugin(ida_executable, force=args.force)
+                ida_executable = find_ida(args.ida_dir)
+                if not ida_executable:
+                    result = {"error": "IDA Pro not found. Pass --ida-dir, set IDA_DIR, or use --user.", "success": False}
+                else:
+                    result = install_plugin(ida_executable, force=args.force)
             return format_output(result, args.compact)
 
         with BridgeClient(
