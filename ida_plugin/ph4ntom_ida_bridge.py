@@ -232,8 +232,15 @@ ALLOWED_EXPORT_ROOTS = tuple(
 )
 
 
+def _any_path_basename(raw):
+    """Extract basename across both Windows ('\\') and POSIX ('/') module/file paths."""
+    if not raw:
+        return ""
+    return str(raw).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
 def _is_sensitive_bridge_filename(path_str):
-    base = os.path.basename(path_str).lower()
+    base = _any_path_basename(path_str).lower()
     return base.startswith(".ph4ntom_ida_bridge_token") or base == ".ph4ntom_ida_instances.json"
 
 
@@ -551,13 +558,13 @@ def _format_module_rva_inner(ea):
                     mbase = getattr(m, 'base', ida_idaapi.BADADDR)
                     msize = getattr(m, 'size', 0)
                     if mbase != ida_idaapi.BADADDR and mbase <= ea < (mbase + msize if msize else ida_idaapi.BADADDR):
-                        mod_base_name = os.path.basename(getattr(m, 'name', '') or "") or "module"
+                        mod_base_name = _any_path_basename(getattr(m, 'name', '') or "") or "module"
                         return f"{mod_base_name}+{hex(ea - mbase)}"
             import ida_idd
             if hasattr(ida_idd, 'modinfo_t') and hasattr(ida_dbg, 'get_module_info'):
                 mi = ida_idd.modinfo_t()
                 if ida_dbg.get_module_info(ea, mi) and mi.base != ida_idaapi.BADADDR and ea >= mi.base:
-                    mod_base_name = os.path.basename(mi.name) if mi.name else "module"
+                    mod_base_name = _any_path_basename(mi.name) if mi.name else "module"
                     return f"{mod_base_name}+{hex(ea - mi.base)}"
     except Exception:
         pass
@@ -3680,7 +3687,7 @@ def dbg_get_stack():
             if hasattr(ida_idd, 'modinfo_t') and hasattr(ida_dbg, 'get_module_info'):
                 mi = ida_idd.modinfo_t()
                 if ida_dbg.get_module_info(f.callea, mi):
-                    mod_name = os.path.basename(mi.name) if mi.name else None
+                    mod_name = _any_path_basename(mi.name) if mi.name else None
             frames.append({
                 "index": i,
                 "caller": hex(f.callea),
@@ -4151,7 +4158,7 @@ def _lookup_named_base_ea_inner(base_str):
         if hasattr(ida_dbg, 'is_debugger_on') and ida_dbg.is_debugger_on():
             if hasattr(ida_dbg, 'get_modules'):
                 for mod in ida_dbg.get_modules():
-                    mname = os.path.basename(getattr(mod, 'name', '') or "").lower()
+                    mname = _any_path_basename(getattr(mod, 'name', '') or "").lower()
                     mfull = (getattr(mod, 'name', '') or "").lower()
                     mnoext = _strip_module_ext(mname)
                     if base_lower in (mname, mfull, mnoext) or (base_no_ext and base_no_ext == mnoext):
@@ -4164,7 +4171,7 @@ def _lookup_named_base_ea_inner(base_str):
                     mod = ida_idd.modinfo_t()
                     ok = ida_dbg.get_first_module(mod)
                     while ok:
-                        mname = os.path.basename(mod.name or "").lower()
+                        mname = _any_path_basename(mod.name or "").lower()
                         mfull = (mod.name or "").lower()
                         mnoext = _strip_module_ext(mname)
                         if base_lower in (mname, mfull, mnoext) or (base_no_ext and base_no_ext == mnoext):
