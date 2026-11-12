@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -36,8 +37,10 @@ class BridgeClient:
         timeout: float = DEFAULT_TIMEOUT,
         token: Optional[str] = None,
         token_file: Optional[str] = None,
+        *,
+        base_url: Optional[str] = None,
     ) -> None:
-        raw_url = url or os.environ.get("IDA_BRIDGE_URL", DEFAULT_BRIDGE_URL)
+        raw_url = url or base_url or os.environ.get("IDA_BRIDGE_URL", DEFAULT_BRIDGE_URL)
         self.base_url = self._normalize_url(raw_url)
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be greater than zero")
@@ -55,7 +58,10 @@ class BridgeClient:
             raise ValueError("Bridge URL must be an absolute http:// or https:// URL")
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("Bridge URL must not contain credentials, a query, or a fragment")
-        if parsed.hostname not in ('127.0.0.1', 'localhost', '::1'):
+        allowed_hosts = {'127.0.0.1', 'localhost', '::1'}
+        if os.environ.get('IDA_BRIDGE_ALLOW_DOCKER_HOST', '').strip().lower() in ('1', 'true', 'yes'):
+            allowed_hosts.add('host.docker.internal')
+        if parsed.hostname.lower() not in allowed_hosts:
             raise ValueError('Bridge URL must target loopback; session tokens must stay on this computer')
         if parsed.path not in ('', '/'):
             raise ValueError('Bridge URL must not contain a path')
@@ -75,7 +81,7 @@ class BridgeClient:
             read=3,
             status=3,
             backoff_factor=0.3,
-            status_forcelist=(429, 500, 502, 503, 504),
+            status_forcelist=(429, 502, 503, 504),
             allowed_methods=frozenset(("GET", "HEAD", "OPTIONS")),
             respect_retry_after_header=True,
         )
@@ -188,20 +194,27 @@ class BridgeClient:
     def get(self, path: str, **params: Any) -> Dict[str, Any]:
         return self._request("GET", path, params=params)
 
-    def post(self, path: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request("POST", path, json=data or {})
+    def post(self, path: str, data: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> Dict[str, Any]:
+        req_kwargs: Dict[str, Any] = {"json": data or {}}
+        if timeout is not None:
+            req_kwargs["timeout"] = timeout
+        return self._request("POST", path, **req_kwargs)
 
     def call_api(
         self,
         method: str,
         path: str,
         payload: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         normalized_method = method.upper()
+        req_kwargs: Dict[str, Any] = {}
+        if timeout is not None:
+            req_kwargs["timeout"] = timeout
         if normalized_method == "GET":
-            return self._request("GET", path, params=payload or {})
+            return self._request("GET", path, params=payload or {}, **req_kwargs)
         if normalized_method == "POST":
-            return self._request("POST", path, json=payload or {})
+            return self._request("POST", path, json=payload or {}, **req_kwargs)
         return {"error": "Only GET and POST are supported", "success": False}
 
     @staticmethod
@@ -229,8 +242,20 @@ class BridgeClient:
             return self.get("/api/functions-page", offset=offset, limit=limit)
         return self.get("/api/functions")
 
-    def strings(self, filter_pattern: Optional[str] = None) -> Dict[str, Any]:
-        params = {"filter": filter_pattern} if filter_pattern else {}
+    def strings(
+        self,
+        filter_pattern: Optional[str] = None,
+        *,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if filter_pattern:
+            params["filter"] = filter_pattern
+        if limit is not None:
+            params["limit"] = limit
+        if offset:
+            params["offset"] = offset
         return self.get("/api/strings", **params)
 
     def xrefs_to(self, ea: str) -> Dict[str, Any]:
@@ -251,11 +276,38 @@ class BridgeClient:
             {"name": name},
         )
 
-    def classes(self) -> Dict[str, Any]:
-        return self.get("/api/classes")
+    def classes(
+        self,
+        filter_pattern: Optional[str] = None,
+        *,
+        toplevel_only: bool = False,
+        include_hidden: bool = False,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if filter_pattern:
+            params["filter"] = filter_pattern
+        if toplevel_only:
+            params["toplevel"] = "1"
+        if include_hidden:
+            params["hidden"] = "1"
+        return self.get("/api/classes", **params)
 
-    def class_details(self, name: str) -> Dict[str, Any]:
-        return self.get(f"/api/class/{self.path_component(name)}")
+    def class_details(
+        self,
+        name: str,
+        *,
+        ea: Optional[str] = None,
+        render: bool = True,
+        no_bodies: bool = False,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if ea is not None:
+            params["ea"] = ea
+        if not render:
+            params["render"] = "0"
+        if no_bodies:
+            params["no_bodies"] = "1"
+        return self.get(f"/api/class/{self.path_component(name)}", **params)
 
     def dbg_status(self) -> Dict[str, Any]:
         return self.get("/api/dbg/status")
@@ -286,17 +338,100 @@ class BridgeClient:
     def dbg_events(self, limit: int = 50) -> Dict[str, Any]:
         return self.get("/api/dbg/events", limit=limit)
 
+    @staticmethod
+    def _instances_registry_path() -> Path:
+        configured = os.environ.get("IDA_BRIDGE_INSTANCES_FILE")
+        if configured and configured.strip():
+            return Path(configured.strip()).expanduser()
+        return Path.home() / ".ph4ntom_ida_instances.json"
+
+    @staticmethod
+    def _is_pid_alive(pid: Any) -> bool:
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            return False
+        if pid_int <= 0:
+            return False
+        if pid_int == os.getpid():
+            return True
+        if os.name == "nt":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+                kernel.OpenProcess.restype = wintypes.HANDLE
+                kernel.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+                kernel.GetExitCodeProcess.restype = wintypes.BOOL
+                kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+                handle = kernel.OpenProcess(0x1000, False, pid_int)
+                if not handle:
+                    return ctypes.get_last_error() == 5
+                try:
+                    exit_code = wintypes.DWORD(0)
+                    if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        return True
+                    return exit_code.value == 259
+                finally:
+                    kernel.CloseHandle(handle)
+            except Exception:
+                return False
+        try:
+            os.kill(pid_int, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _validated_registry_token_path(raw_path: Any) -> Optional[str]:
+        if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
+            return None
+        candidate = Path(raw_path.strip()).expanduser()
+        is_junc = getattr(os.path, "isjunction", lambda _p: False)
+        if candidate.is_symlink() or is_junc(str(candidate)) or is_junc(str(candidate.parent)):
+            return None
+        if not re.fullmatch(r"\.ph4ntom_ida_bridge_token(?:_\d+)?", candidate.name):
+            return None
+        try:
+            if not candidate.is_file():
+                return None
+            resolved_parent = os.path.normcase(str(candidate.parent.resolve()))
+            trusted_dirs = {
+                os.path.normcase(str(Path.home().resolve())),
+                os.path.normcase(str(Path(tempfile.gettempdir()).resolve())),
+            }
+            configured_tok = os.environ.get("IDA_BRIDGE_TOKEN_FILE")
+            if configured_tok and configured_tok.strip():
+                trusted_dirs.add(
+                    os.path.normcase(str(Path(configured_tok.strip()).expanduser().resolve().parent))
+                )
+            if resolved_parent not in trusted_dirs:
+                return None
+            return str(candidate.resolve())
+        except OSError:
+            return None
+
     def list_instances(self) -> Dict[str, Any]:
         """Return active IDA Bridge instances from ~/.ph4ntom_ida_instances.json or /api/instances."""
         import json as _json
-        reg_path = Path.home() / ".ph4ntom_ida_instances.json"
+        reg_path = self._instances_registry_path()
         instances = []
         if reg_path.is_file():
             try:
                 raw = _json.loads(reg_path.read_text(encoding="utf-8")) or {}
                 for _, item in sorted(raw.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
-                    if isinstance(item, dict):
-                        instances.append(item)
+                    if not isinstance(item, dict):
+                        continue
+                    pid = item.get("pid")
+                    if pid is not None and not self._is_pid_alive(pid):
+                        continue
+                    instances.append(item)
             except Exception:
                 pass
         if not instances:
@@ -306,18 +441,23 @@ class BridgeClient:
         return {"instances": instances, "active_url": self.base_url, "count": len(instances)}
 
     def select_instance(self, target: Any) -> Dict[str, Any]:
-        """Switch this client to target IDA instance by port (e.g. 13371) or binary name (e.g. 'networksystem.dll')."""
+        """Switch this client to target IDA instance by port (e.g. 13371), PID, or binary name."""
         target_str = str(target).strip()
         instances = self.list_instances().get("instances", [])
         chosen = None
         if target_str.isdigit():
-            port = int(target_str)
+            num = int(target_str)
             for item in instances:
-                if item.get("port") == port:
+                if item.get("port") == num:
                     chosen = item
                     break
             if chosen is None:
-                chosen = {"port": port, "url": f"http://127.0.0.1:{port}"}
+                for item in instances:
+                    if item.get("pid") == num:
+                        chosen = item
+                        break
+            if chosen is None and 1 <= num <= 65535:
+                chosen = {"port": num, "url": f"http://127.0.0.1:{num}"}
         else:
             t_low = target_str.lower()
             for item in instances:
@@ -329,11 +469,12 @@ class BridgeClient:
         if chosen is None:
             return {"success": False, "error": f"No active IDA instance matching '{target_str}'", "instances": instances}
         with self._request_lock:
-            self.base_url = self._normalize_url(chosen["url"])
-            if chosen.get("token_path"):
-                self._explicit_token_file = chosen["token_path"]
-            else:
-                self._explicit_token_file = None
+            new_url = self._normalize_url(chosen["url"])
+            if new_url != self.base_url:
+                self._explicit_token = None
+            self.base_url = new_url
+            valid_token_path = self._validated_registry_token_path(chosen.get("token_path"))
+            self._explicit_token_file = valid_token_path
             self._load_token(self.session)
         return {"success": True, "selected": chosen, "active_url": self.base_url}
 

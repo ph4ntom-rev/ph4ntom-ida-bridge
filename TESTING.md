@@ -1,6 +1,6 @@
 # IDA test checklist
 
-## Automated verification for 6.2.0
+## Automated verification for 6.4.0
 
 ```powershell
 python -m pip install ".[dev,mcp]"
@@ -28,8 +28,8 @@ preview, reversible rename, error propagation, script-execution refusal,
 saving, combined context, and concurrent event connections. It restores the
 fixture function name before saving.
 
-Local verification covers Windows and IDA Professional 9.3 with x64 Hex-Rays.
-Unit tests use Python 3.10 and 3.12. This is not certification for every IDA 9.x
+Local verification covers Windows and IDA Professional 9.3–9.5 with x64 Hex-Rays.
+Unit tests use Python 3.10–3.14. This is not certification for every IDA 9.x
 release, architecture, debugger backend, or third-party plugin combination.
 Debugger memory/breakpoint failure cases have stubbed regression coverage;
 full live debugger sessions and ARM targets require additional licensed tests.
@@ -66,9 +66,10 @@ Expected `ping` fields include:
 ```json
 {
   "status": "ok",
-  "version": "6.2.0",
+  "version": "6.4.0",
   "auth_enabled": true,
-  "dynamic_exec_enabled": false
+  "dynamic_exec_enabled": false,
+  "dbg_start_enabled": false
 }
 ```
 
@@ -127,8 +128,8 @@ testing if dynamic execution is not required.
 python verify_mcp.py
 ```
 
-Expected: 54 tools and 2 resources. Then connect an MCP client using the absolute
-path to `mcp_server.py` and run `ping`, `get_binary_info`, and `decompile`.
+Expected: 131 tools and 2 resources. Then connect an MCP client using the absolute
+path to `mcp_server.py` (or `ph4ntom-mcp`) and run `ping`, `get_binary_info`, and `decompile`.
 
 ## 7. Shutdown test
 

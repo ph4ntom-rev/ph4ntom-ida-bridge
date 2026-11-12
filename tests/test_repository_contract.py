@@ -10,15 +10,15 @@ def test_schema_and_project_versions_match():
     schema = json.loads((ROOT / "api_schema.json").read_text(encoding="utf-8"))
     agent_config = json.loads((ROOT / "agent_config.json").read_text(encoding="utf-8"))
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert schema["meta"]["version"] == "6.3.0"
-    assert agent_config["version"] == "6.3.0"
-    assert 'version = "6.3.0"' in pyproject
+    assert schema["meta"]["version"] == "6.4.0"
+    assert agent_config["version"] == "6.4.0"
+    assert 'version = "6.4.0"' in pyproject
 
 
 def test_schema_declares_expected_endpoint_coverage():
     schema = json.loads((ROOT / "api_schema.json").read_text(encoding="utf-8"))
-    assert len(schema["endpoints"]["read"]) == 68
-    assert len(schema["endpoints"]["write"]) == 71
+    assert len(schema["endpoints"]["read"]) == 70
+    assert len(schema["endpoints"]["write"]) == 72
 
 
 def test_plugin_has_one_function_router_per_http_method():

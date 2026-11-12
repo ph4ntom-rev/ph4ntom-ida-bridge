@@ -1,3 +1,4 @@
 include README.md CHANGELOG.md SECURITY.md TESTING.md LICENSE
 include api_schema.json agent_config.json AGENT_SKILL.md
+recursive-include .agents/skills *.md
 recursive-include tests *.py *.c

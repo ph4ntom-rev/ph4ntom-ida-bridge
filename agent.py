@@ -207,11 +207,13 @@ class AgentBackend(ABC):
             return json.dumps({"error": f"Execution failed: {e}", "success": False})
 
     def call_bridge_api(self, method: str, path: str, body: Union[str, dict] = "{}") -> str:
+        from urllib.parse import parse_qsl, urlsplit
+
         logger.info(f"[{self.get_name()}] Bridge call: {method} {path}")
 
         if not path.startswith("/api/"):
             return json.dumps({"error": "Bridge path must start with /api/", "success": False})
-        
+
         if isinstance(body, str):
             try:
                 data = json.loads(body) if body.strip() and body != "{}" else None
@@ -220,8 +222,18 @@ class AgentBackend(ABC):
         else:
             data = body
 
+        split_path = urlsplit(path)
+        clean_path = split_path.path
+        if split_path.query:
+            query_params = dict(parse_qsl(split_path.query, keep_blank_values=True))
+            if method.upper() == "GET":
+                merged = dict(query_params)
+                if isinstance(data, dict):
+                    merged.update(data)
+                data = merged
+
         try:
-            result = self.client.call_api(method, path, data)
+            result = self.client.call_api(method, clean_path, data)
             result_str = json.dumps(result, indent=2)
             logger.debug(f"Response: {result_str[:500]}..." if len(result_str) > 500 else f"Response: {result_str}")
             return result_str

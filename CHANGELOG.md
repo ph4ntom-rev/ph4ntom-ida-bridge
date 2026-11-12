@@ -1,5 +1,28 @@
 # Changelog
 
+## 6.4.0 (2026-11-13)
+
+### Security & Isolation
+- Closed conditional-breakpoint script execution bypass: non-empty `condition` expressions on `POST /api/dbg/breakpoint`, `POST /api/dbg/watchpoint`, `POST /api/dbg/update-breakpoint`, and `POST /api/dbg/breakpoints/import` now require `IDA_BRIDGE_ALLOW_EXEC=1` (HTTP `403` otherwise).
+- Gated local debugger process launch/attach (`POST /api/dbg/start`, `POST /api/dbg/attach`, local `POST /api/dbg/load`, and inactive-session `POST /api/dbg/run-to`) behind explicit `IDA_BRIDGE_ALLOW_DBG_START=1` (or `IDA_BRIDGE_ALLOW_EXEC=1`), returning HTTP `403` by default.
+- Prohibited server-side file writes via `HTTP GET` (`GET /api/dbg/breakpoints/export` and `GET /api/dbg/evidence` reject `?output=` / `?save_path=` with HTTP `400`).
+- Restricted server-side file exports/imports (`POST /api/decompile-batch`, `POST /api/dbg/breakpoints/export`, `POST /api/dbg/breakpoints/import`, `POST /api/dbg/evidence`) with `_validate_trusted_file_path` (`IDA_BRIDGE_ALLOWED_EXPORT_ROOTS` / `IDA_BRIDGE_ALLOWED_IMPORT_ROOTS`, symlink rejection, credential-filename block, and `READ_ONLY` enforcement), while moving MCP and CLI file persistence (`decompile_batch`, `dbg_export_breakpoints`, `dbg_import_breakpoints`, `capture_evidence`, `cli.py evidence --save`) completely client-side.
+- Secured `~/.ph4ntom_ida_instances.json` (`IDA_BRIDGE_INSTANCES_FILE`) with atomic owner-only DACL / `0600` permissions, dead-PID pruning, `database_inited` metadata refresh, and strict `token_path` validation in `BridgeClient.select_instance()`.
+- Removed Python tracebacks and host filesystem paths from HTTP `500` responses while preserving structured `400`/`403` client errors across `_run_synced`; gated `host.docker.internal` in `BridgeClient` behind `IDA_BRIDGE_ALLOW_DOCKER_HOST=1` and stopped retrying HTTP `500` responses.
+
+### Architecture, Debugger Reliability & Performance
+- Replaced monolithic `execute_sync` blocking waits in `dbg_wait_event` and synchronous step/continue/run-to operations with `40ms` `WFNE_USEC | WFNE_SILENT` slices (`_dbg_wait_sliced`), keeping IDA's UI responsive, dequeuing IDA 9.5 debug events cleanly (including `ev.exc()` details and immediate `DEC_NOTASK` termination), suppressing modal warning dialogs in headless/MCP sessions, and allowing concurrent `POST /api/dbg/pause` without deadlocking.
+- Enforced strict thread-selection verification and `finally`-block restoration across `_read_regs_inner`, `dbg_get_regs`, `dbg_set_reg`, and `dbg_appcall_api` so failed `select_thread(tid)` calls never mutate or leak another thread's registers/IP/SP.
+- Consolidated `get_call_graph` into a single `safe_read` synchronization barrier and updated it (along with `get_xrefs_from`, `get_callees`, and `get_strings_used`) to iterate `_iter_func_items` across non-contiguous function chunks while preserving multiple call sites to the same callee.
+- Added chunk-boundary overlap and hit deduplication to `dbg_search_memory_api` so patterns straddling `256 KiB` boundaries are reliably detected.
+- Eliminated `build_strlist()` rebuilds on paginated `GET /api/strings` requests and removed duplicate startup/shutdown banners in IDA's Output window.
+
+### Firmware, SDK Contracts & MCP Expansion (98 → 131 Tools)
+- Fixed Hex-Rays decompiler timeout conversion (`seconds` ↔ milliseconds in `DECOMPILER_TIMEOUT`), `capture_evidence` contract fields (`target.disasm`, `ascii`, `notes`, `include_*` flags), safe regex fallback (`_compile_filter_regex`) across strings/xrefs/classes, `GET /api/classes` & `GET /api/class/<name>` query routing, `dbg_update_bp(tid=0)` clearing thread filters, exception name/flag preservation in `dbg_configure_exception_api`, pointer-width telescoping, ARM Thumb vtable resolution & function prototypes, and 32/64-bit/PIC jump-table parsing in `get_switch_info`.
+- Improved embedded/firmware support (`imagebase == 0` formats `module_rva` as `SEG+0xOFFSET`, `BADADDR` entry point serializes as `None`, symbol names take precedence over bare hex strings like `add`/`dead` in `parse_ea`, hyphenated `.so` module names resolve cleanly in `module+RVA`, and `execute_batch` accepts symbolic/`module+RVA` addresses).
+- Exposed all **33 remaining REST capabilities** as annotated MCP tools in `mcp_server.py` (**131 total MCP tools**, plus `ph4ntom-mcp` console script), fixed query-string handling in `agent.py`, and fixed status/URL-encoding bugs in `integrations/ide_extension.py`.
+- Bundled a portable **IDA Pro 9.5 Agent Skill** in `.agents/skills/ida-pro/` (`SKILL.md` + `idapython-95-sdk.md`, `firmware-types-and-vtables.md`, and `debugging-microcode-and-batch.md` references) with `ph4ntom-ida install-skill` (`--runtime antigravity|agents|claude`, `--dest`, `--force`), and added animated live workflow demo & Retina feature screenshots in `assets/`.
+
 ## 6.3.0 (2026-11-08)
 
 - Added full **IDA Professional 9.5** SDK compatibility:

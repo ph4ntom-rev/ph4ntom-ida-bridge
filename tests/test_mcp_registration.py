@@ -12,7 +12,7 @@ def test_mcp_registers_expected_tools_and_resources():
     resources = asyncio.run(mcp.list_resources())
     names = {tool.name for tool in tools}
 
-    assert len(tools) == 98
+    assert len(tools) == 131
     assert len(resources) == 2
     assert {
         "ping",
@@ -47,6 +47,39 @@ def test_mcp_registers_expected_tools_and_resources():
         "dbg_get_trace",
         "dbg_get_events",
         "dbg_appcall",
+        "get_enum",
+        "create_enum",
+        "add_enum_member",
+        "delete_enum",
+        "add_struct_member",
+        "delete_struct",
+        "apply_struct",
+        "delete_type",
+        "list_type_libraries",
+        "load_type_library",
+        "make_function",
+        "delete_function",
+        "make_code",
+        "make_data",
+        "undefine",
+        "set_name",
+        "reanalyze",
+        "wait_for_analysis",
+        "get_global_vars",
+        "get_stack_vars",
+        "get_switch_info",
+        "get_instruction",
+        "list_patches",
+        "list_function_gaps",
+        "list_bookmarks",
+        "add_bookmark",
+        "delete_bookmark",
+        "get_cursor",
+        "get_selection",
+        "create_segment",
+        "delete_segment",
+        "set_segment_attrs",
+        "analyze_function_context",
     }.issubset(names)
 
 

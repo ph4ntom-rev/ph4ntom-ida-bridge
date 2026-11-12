@@ -10,8 +10,11 @@ session token from `~/.ph4ntom_ida_bridge_token`.
 2. Do not rename, comment, patch, debug, execute code, or save the database
    unless the user has authorized that class of change.
 3. Prefer a documented endpoint over dynamic IDAPython.
-4. Treat `/api/exec` as local code execution. It is unavailable unless the IDA
-   process was started with `IDA_BRIDGE_ALLOW_EXEC=1`.
+4. Treat `/api/exec`, `/api/dbg/cmd`, `/api/dbg/appcall`, and conditional
+   breakpoint expressions as local code execution. They are unavailable unless
+   the IDA process was started with `IDA_BRIDGE_ALLOW_EXEC=1`. Launching a new
+   process via `/api/dbg/start` requires `IDA_BRIDGE_ALLOW_DBG_START=1` (or
+   `IDA_BRIDGE_ALLOW_EXEC=1`).
 5. Preview related mutations using `/api/batch` with `dry_run: true`. Default rollback mode compensates name/comment values; inspect `rollback_complete`. Type and local-variable operations require explicit `mode: "best_effort"` and can leave partial changes. Never describe a batch as a database transaction.
 6. Work on a copy of the database when testing destructive operations.
 
@@ -21,7 +24,8 @@ session token from `~/.ph4ntom_ida_bridge_token`.
 python cli.py ping
 python cli.py info
 python cli.py functions --limit 100
-python cli.py strings --filter "password|token|http"
+python cli.py strings --filter "password|token|http" --limit 100 --offset 0
+python cli.py evidence --ea 0x140001000 --save evidence.json
 python cli.py decompile 0x140001000
 python cli.py xrefs 0x140001000
 python cli.py callers 0x140001000

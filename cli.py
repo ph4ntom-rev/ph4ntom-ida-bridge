@@ -33,6 +33,17 @@ SCHEMA_SOURCE = next(
     ),
     PROJECT_ROOT / "api_schema.json",
 )
+SKILL_SOURCE_DIR = next(
+    (
+        path
+        for path in (
+            PROJECT_ROOT / ".agents" / "skills" / "ida-pro",
+            Path(sys.prefix) / "share" / "ph4ntom-ida-bridge" / "skills" / "ida-pro",
+        )
+        if (path / "SKILL.md").is_file()
+    ),
+    PROJECT_ROOT / ".agents" / "skills" / "ida-pro",
+)
 
 
 def format_output(data: Dict[str, Any], compact: bool = False) -> int:
@@ -200,6 +211,67 @@ def install_plugin(
     }
 
 
+def _skill_target_root(runtime: str, dest: Optional[str]) -> Path:
+    if dest:
+        return Path(dest).expanduser()
+    home = Path.home()
+    if runtime == "antigravity":
+        return home / ".gemini" / "config" / "skills"
+    if runtime == "claude":
+        return home / ".claude" / "skills"
+    return home / ".agents" / "skills"
+
+
+def install_skill(
+    runtime: str = "antigravity",
+    dest: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Install the bundled ida-pro Agent Skill (SKILL.md + references/) into an agent skills root."""
+    if not (SKILL_SOURCE_DIR / "SKILL.md").is_file():
+        return {"error": f"Bundled skill directory not found: {SKILL_SOURCE_DIR}", "success": False}
+    skills_root = _skill_target_root(runtime, dest)
+    target_dir = skills_root / "ida-pro"
+    is_junc = getattr(os.path, "isjunction", lambda _p: False)
+    for chk in (skills_root, target_dir):
+        if chk.is_symlink() or is_junc(str(chk)):
+            return {"error": f"Refusing symlink/junction skill destination: {chk}", "success": False}
+
+    source_files = sorted(p for p in SKILL_SOURCE_DIR.rglob("*") if p.is_file())
+    pending = []
+    unchanged = []
+    for src in source_files:
+        rel = src.relative_to(SKILL_SOURCE_DIR)
+        dst = target_dir / rel
+        if dst.is_symlink() or is_junc(str(dst)):
+            return {"error": f"Refusing symlink/junction skill file: {dst}", "success": False}
+        if dst.exists():
+            if filecmp.cmp(src, dst, shallow=False):
+                unchanged.append(str(dst))
+                continue
+            if not force:
+                return {
+                    "error": f"Skill file already exists and differs: {dst}",
+                    "hint": "Re-run with --force to replace existing skill files.",
+                    "success": False,
+                }
+        pending.append((src, dst))
+
+    installed = []
+    for src, dst in pending:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        installed.append(str(dst))
+
+    return {
+        "success": True,
+        "skill": "ida-pro",
+        "skill_directory": str(target_dir),
+        "installed": installed,
+        "unchanged": unchanged,
+    }
+
+
 def _parse_json_object(raw: Optional[str], label: str) -> Dict[str, Any]:
     if not raw:
         return {}
@@ -283,7 +355,9 @@ def build_parser() -> argparse.ArgumentParser:
     functions.add_argument("--offset", type=int, default=0)
 
     strings = sub.add_parser("strings", help="List strings")
-    strings.add_argument("--filter", default=None, help="Server-side regular expression")
+    strings.add_argument("--filter", default=None, help="Server-side regular expression or substring")
+    strings.add_argument("--limit", type=int, default=2000, help="Max strings per page (default: 2000)")
+    strings.add_argument("--offset", type=int, default=0, help="Pagination start index")
 
     for command in ("decompile", "pseudocode", "xrefs", "callers", "callees"):
         endpoint = sub.add_parser(command, help=f"Run {command} for a function")
@@ -310,6 +384,16 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--ida-dir", help="IDA installation directory")
     install.add_argument("--user", action="store_true", help="Install into the user IDA plugins directory ($IDAUSR/plugins)")
     install.add_argument("--force", action="store_true", help="Back up and replace differing files")
+
+    skill_cmd = sub.add_parser("install-skill", help="Install the ida-pro Agent Skill (SKILL.md + references)")
+    skill_cmd.add_argument(
+        "--runtime",
+        choices=("antigravity", "agents", "claude"),
+        default="antigravity",
+        help="Target skill runtime directory (default: antigravity -> ~/.gemini/config/skills)",
+    )
+    skill_cmd.add_argument("--dest", default=None, help="Explicit parent skills directory override")
+    skill_cmd.add_argument("--force", action="store_true", help="Replace existing skill files if modified")
 
     launch = sub.add_parser("launch", help="Launch IDA with a binary")
     launch.add_argument("binary")
@@ -357,13 +441,30 @@ def _dispatch(client: BridgeClient, args: argparse.Namespace) -> Dict[str, Any]:
     if command == "dbg-events":
         return client.dbg_events()
     if command == "instances":
-        return {"success": True, "active_url": client.base_url, "instances": client.list_instances()}
+        res = client.list_instances()
+        if isinstance(res, dict) and "error" not in res:
+            return {"success": True, "active_url": client.base_url, **res}
+        return res
     if command == "evidence":
-        return client.post("/api/dbg/evidence", {"ea": args.ea, "save_path": args.save, "notes": args.notes})
+        payload_ev: Dict[str, Any] = {"ea": args.ea, "notes": args.notes}
+        res = client.post("/api/dbg/evidence", payload_ev)
+        if res.get("error") == "Bridge is configured read-only":
+            ev_params = {"ea": args.ea} if args.ea else {}
+            res = client.get("/api/dbg/evidence", **ev_params)
+            if not res.get("error") and args.notes:
+                res["notes"] = args.notes
+        if args.notes and not res.get("error") and "notes" not in res:
+            res["notes"] = args.notes
+        if args.save and not res.get("error") and res.get("success") is not False:
+            out_file = Path(args.save).expanduser().resolve()
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_text(json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
+            res["saved_to"] = str(out_file)
+        return res
     if command == "functions":
         return client.functions(limit=args.limit, offset=args.offset)
     if command == "strings":
-        return client.strings(args.filter)
+        return client.strings(args.filter, limit=args.limit, offset=args.offset)
     if command in ("decompile", "pseudocode"):
         return client.decompile(args.ea)
     if command == "xrefs":
@@ -418,6 +519,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     try:
+        if args.command == "install-skill":
+            result = install_skill(runtime=args.runtime, dest=args.dest, force=args.force)
+            return format_output(result, args.compact)
+
         if args.command == "install-plugin":
             if getattr(args, "user", False):
                 result = install_plugin("", force=args.force, plugin_dir_override=_user_plugin_directory())

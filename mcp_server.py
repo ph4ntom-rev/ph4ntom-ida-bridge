@@ -1,7 +1,7 @@
 """
 ph4ntom IDA Bridge — MCP Server
 ====================================
-Model Context Protocol server that exposes 90 IDA Pro 9.5+ tools
+Model Context Protocol server that exposes 131 IDA Pro 9.5+ tools
 to any MCP-compatible AI client (Claude Desktop, Cursor, Cline, Antigravity, etc.)
 
 Uses the shared BridgeClient for thread-safety, connection pooling,
@@ -9,6 +9,8 @@ bearer token authentication, and robust exponential backoff.
 """
 
 import json
+import os
+from pathlib import Path
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -21,15 +23,33 @@ def _get(path: str, **params) -> dict:
     """GET request via BridgeClient."""
     return _checked(client.call_api("GET", path, params))
 
-def _post(path: str, data: Optional[dict] = None) -> dict:
+def _post(path: str, data: Optional[dict] = None, timeout: Optional[float] = None) -> dict:
     """POST request via BridgeClient."""
+    if timeout is not None:
+        return _checked(client.call_api("POST", path, data, timeout=timeout))
     return _checked(client.call_api("POST", path, data))
 
 
 def _checked(result: dict) -> dict:
-    if result.get('error') or result.get('success') is False:
+    if result.get('error') or (result.get('success') is False and not result.get('timed_out')):
         raise ToolError(json.dumps(result, ensure_ascii=False))
     return result
+
+
+def _safe_client_file_path(raw: str) -> Path:
+    p = Path(raw.strip()).expanduser()
+    low_name = p.name.lower()
+    if low_name.startswith(".ph4ntom_ida_bridge_token") or low_name == ".ph4ntom_ida_instances.json":
+        raise ValueError("Refusing to read or overwrite bridge credential/registry files")
+    is_junc = getattr(os.path, "isjunction", lambda _x: False)
+    cur = p.absolute()
+    while True:
+        if cur.is_symlink() or is_junc(str(cur)):
+            raise ValueError("Symlink or junction paths are not permitted")
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return p.resolve()
 
 
 def _component(value: object) -> str:
@@ -98,13 +118,13 @@ def decompile(ea: str) -> str:
     """
     return json.dumps(_get(f"/api/function/{_component(ea)}/pseudocode"), indent=2)
 
-@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def decompile_batch(addresses_json: str = "", output_path: str = "", format: str = "json", eas: str = "") -> str:
-    """Batch decompile multiple functions and optionally save results to disk (.json or .c).
+    """Batch decompile multiple functions and optionally save results locally to disk (.json or .c).
     
     Args:
         addresses_json: JSON array or comma-separated list of addresses or 'module+0xRVA' strings (e.g. '["0x140001000", "networksystem.dll+0xC3EA7"]')
-        output_path: Optional file path to save decompiled output
+        output_path: Optional local file path to save decompiled output
         format: Output file format when output_path is set ('json' or 'c')
         eas: Alias for addresses_json (comma-separated or JSON array)
     """
@@ -117,7 +137,23 @@ def decompile_batch(addresses_json: str = "", output_path: str = "", format: str
         addrs = [x.strip() for x in raw.split(",") if x.strip()]
     if not isinstance(addrs, list):
         raise ValueError("addresses_json must decode to a list of addresses")
-    return json.dumps(_post("/api/decompile-batch", {"addresses": addrs, "output_path": output_path or None, "format": format}), indent=2)
+    res = _post("/api/decompile-batch", {"addresses": addrs, "format": format})
+    if output_path and output_path.strip():
+        out_file = _safe_client_file_path(output_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        if str(format).lower() == "c" or out_file.suffix.lower() in (".c", ".cc", ".cpp", ".h"):
+            chunks = []
+            for item in res.get("results", []):
+                chunks.append(f"// === Function: {item.get('name', 'unknown')} @ {item.get('ea', '?')} ===")
+                if item.get("error"):
+                    chunks.append(f"// ERROR: {item['error']}\n")
+                else:
+                    chunks.append((item.get("pseudocode") or "") + "\n")
+            out_file.write_text("\n".join(chunks), encoding="utf-8")
+        else:
+            out_file.write_text(json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
+        res["saved_to"] = str(out_file)
+    return json.dumps(res, indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_disassembly(ea: str, end_ea: Optional[str] = None, count: Optional[int] = None) -> str:
@@ -471,18 +507,44 @@ def create_type(definition: str) -> str:
     return json.dumps(_post("/api/type/create", {"definition": definition}))
 
 @mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
-def list_classes() -> str:
+def list_classes(
+    filter_pattern: Optional[str] = None,
+    toplevel_only: bool = False,
+    include_hidden: bool = False,
+) -> str:
     """List decompiler language-neutral classes (IDA 9.5+ Hex-Rays Class API for C++, Dalvik, Swift, Go, Rust)."""
-    return json.dumps(_get("/api/classes"), indent=2)
+    params = {}
+    if filter_pattern:
+        params["filter"] = filter_pattern
+    if toplevel_only:
+        params["toplevel"] = "1"
+    if include_hidden:
+        params["hidden"] = "1"
+    return json.dumps(_get("/api/classes", **params), indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
-def get_class(name: str) -> str:
+def get_class(
+    name: str,
+    ea: Optional[str] = None,
+    render: bool = True,
+    no_bodies: bool = False,
+) -> str:
     """Get language-neutral class layout, rendered members, and methods (IDA 9.5+).
     
     Args:
         name: Class name
+        ea: Optional class address override
+        render: Include rendered C++/language representation (default True)
+        no_bodies: Omit method bodies in rendered output (default False)
     """
-    return json.dumps(_get(f"/api/class/{_component(name)}"), indent=2)
+    params = {}
+    if ea is not None:
+        params["ea"] = ea
+    if not render:
+        params["render"] = "0"
+    if no_bodies:
+        params["no_bodies"] = "1"
+    return json.dumps(_get(f"/api/class/{_component(name)}", **params), indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
 def get_decompiler_timeout() -> str:
@@ -824,34 +886,44 @@ def dbg_update_breakpoint(
         "log_regs": log_regs,
     }), indent=2)
 
-@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': True})
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': True})
 def dbg_export_breakpoints(save_path: str = "") -> str:
     """Export all current breakpoints and watchpoints (with module+RVA, conditions, and policies) for persistence across runs.
     
     Args:
-        save_path: Optional file path to save the exported breakpoints JSON
+        save_path: Optional local file path to save the exported breakpoints JSON
     """
-    if save_path:
-        return json.dumps(_post("/api/dbg/breakpoints/export", {"save_path": save_path}), indent=2)
-    return json.dumps(_get("/api/dbg/breakpoints/export"), indent=2)
+    res = _get("/api/dbg/breakpoints/export")
+    if save_path and save_path.strip():
+        out_file = _safe_client_file_path(save_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
+        res["saved_to"] = str(out_file)
+    return json.dumps(res, indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_import_breakpoints(load_path: str = "", breakpoints_json: str = "[]", clear_existing: bool = False) -> str:
     """Restore breakpoints and watchpoints from a saved JSON file or JSON array (resolving module+RVA against current ASLR base).
     
     Args:
-        load_path: Optional path to a JSON file exported by dbg_export_breakpoints
+        load_path: Optional local path to a JSON file exported by dbg_export_breakpoints
         breakpoints_json: Optional JSON array of breakpoint definitions if load_path is not used
         clear_existing: Delete existing breakpoints before importing
     """
-    bps = json.loads(breakpoints_json) if breakpoints_json else []
+    if load_path and load_path.strip():
+        in_file = _safe_client_file_path(load_path)
+        loaded = json.loads(in_file.read_text(encoding="utf-8"))
+        bps = loaded.get("breakpoints", []) if isinstance(loaded, dict) else loaded
+    else:
+        bps = json.loads(breakpoints_json) if breakpoints_json else []
+    if not isinstance(bps, list):
+        raise ValueError("breakpoints must decode to a list")
     return json.dumps(_post("/api/dbg/breakpoints/import", {
-        "load_path": load_path,
         "breakpoints": bps,
         "clear_existing": clear_existing,
     }), indent=2)
 
-@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': True})
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': True})
 def capture_evidence(
     ea: str = "",
     include_stack: bool = True,
@@ -870,18 +942,31 @@ def capture_evidence(
         include_breakpoints: Include active breakpoints and hit counts
         memory_ranges_json: Optional JSON array of [{'ea': '...', 'size': 64, 'label': '...'}] memory ranges to dump
         notes: Optional analyst notes to embed in the evidence artifact
-        save_path: Optional file path to save the evidence JSON
+        save_path: Optional local file path to save the evidence JSON
     """
     mem_ranges = json.loads(memory_ranges_json) if memory_ranges_json else []
-    return json.dumps(_post("/api/dbg/evidence", {
+    raw_res = client.call_api("POST", "/api/dbg/evidence", {
         "ea": ea,
         "include_stack": include_stack,
         "include_modules": include_modules,
         "include_breakpoints": include_breakpoints,
         "memory_ranges": mem_ranges,
         "notes": notes,
-        "save_path": save_path,
-    }), indent=2)
+    })
+    if raw_res.get("error") == "Bridge is configured read-only":
+        ev_params = {"ea": ea} if ea else {}
+        raw_res = client.call_api("GET", "/api/dbg/evidence", ev_params)
+        if not raw_res.get("error") and notes:
+            raw_res["notes"] = notes
+    res = _checked(raw_res)
+    if notes and "notes" not in res:
+        res["notes"] = notes
+    if save_path and save_path.strip():
+        out_file = _safe_client_file_path(save_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
+        res["saved_to"] = str(out_file)
+    return json.dumps(res, indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_continue(wait: bool = False, timeout: int = 5) -> str:
@@ -891,7 +976,8 @@ def dbg_continue(wait: bool = False, timeout: int = 5) -> str:
         wait: Wait synchronously for next debugger event and return updated CPU state
         timeout: Wait timeout in seconds when wait=True
     """
-    return json.dumps(_post("/api/dbg/continue", {"wait": wait, "timeout": timeout}), indent=2)
+    req_timeout = max(client.timeout, float(timeout) + 5.0) if wait else None
+    return json.dumps(_post("/api/dbg/continue", {"wait": wait, "timeout": timeout}, timeout=req_timeout), indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_step_into(wait: bool = False, timeout: int = 5) -> str:
@@ -901,7 +987,8 @@ def dbg_step_into(wait: bool = False, timeout: int = 5) -> str:
         wait: Wait synchronously for step completion and return updated CPU state
         timeout: Wait timeout in seconds when wait=True
     """
-    return json.dumps(_post("/api/dbg/step-into", {"wait": wait, "timeout": timeout}), indent=2)
+    req_timeout = max(client.timeout, float(timeout) + 5.0) if wait else None
+    return json.dumps(_post("/api/dbg/step-into", {"wait": wait, "timeout": timeout}, timeout=req_timeout), indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_step_over(wait: bool = False, timeout: int = 5) -> str:
@@ -911,7 +998,8 @@ def dbg_step_over(wait: bool = False, timeout: int = 5) -> str:
         wait: Wait synchronously for step completion and return updated CPU state
         timeout: Wait timeout in seconds when wait=True
     """
-    return json.dumps(_post("/api/dbg/step-over", {"wait": wait, "timeout": timeout}), indent=2)
+    req_timeout = max(client.timeout, float(timeout) + 5.0) if wait else None
+    return json.dumps(_post("/api/dbg/step-over", {"wait": wait, "timeout": timeout}, timeout=req_timeout), indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_step_out(wait: bool = False, timeout: int = 5) -> str:
@@ -921,7 +1009,8 @@ def dbg_step_out(wait: bool = False, timeout: int = 5) -> str:
         wait: Wait synchronously for return and return updated CPU state
         timeout: Wait timeout in seconds when wait=True
     """
-    return json.dumps(_post("/api/dbg/step-out", {"wait": wait, "timeout": timeout}), indent=2)
+    req_timeout = max(client.timeout, float(timeout) + 5.0) if wait else None
+    return json.dumps(_post("/api/dbg/step-out", {"wait": wait, "timeout": timeout}, timeout=req_timeout), indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': True})
 def dbg_run_to(ea: str, wait: bool = False, timeout: int = 5) -> str:
@@ -932,17 +1021,36 @@ def dbg_run_to(ea: str, wait: bool = False, timeout: int = 5) -> str:
         wait: Wait synchronously until target is reached
         timeout: Wait timeout in seconds when wait=True
     """
-    return json.dumps(_post("/api/dbg/run-to", {"ea": ea, "wait": wait, "timeout": timeout}), indent=2)
+    req_timeout = max(client.timeout, float(timeout) + 5.0) if wait else None
+    return json.dumps(_post("/api/dbg/run-to", {"ea": ea, "wait": wait, "timeout": timeout}, timeout=req_timeout), indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'idempotentHint': False, 'openWorldHint': True})
-def dbg_wait_event(timeout: int = 5, wfne: int = 1) -> str:
-    """Wait synchronously for the next debugger event and return the resulting debugger status.
+def dbg_wait_event(
+    timeout: int = 5,
+    wfne: Optional[int] = None,
+    wait_for_suspend: bool = True,
+    resume: bool = False,
+    silent: bool = True,
+) -> str:
+    """Wait synchronously for the next debugger event without freezing IDA's UI thread.
     
     Args:
-        timeout: Timeout in seconds
-        wfne: Wait flags (default 1 = WFNE_ANY)
+        timeout: Timeout in seconds (0..300)
+        wfne: Optional explicit IDA WFNE_* bitmask override
+        wait_for_suspend: Wait for process suspension event (default True)
+        resume: Resume execution before waiting (default False)
+        silent: Suppress modal IDA dialogs during wait (default True)
     """
-    return json.dumps(_post("/api/dbg/wait", {"timeout": timeout, "wfne": wfne}), indent=2)
+    payload = {
+        "timeout": timeout,
+        "wait_for_suspend": wait_for_suspend,
+        "resume": resume,
+        "silent": silent,
+    }
+    if wfne is not None:
+        payload["wfne"] = wfne
+    req_timeout = max(client.timeout, float(timeout) + 5.0)
+    return json.dumps(_post("/api/dbg/wait", payload, timeout=req_timeout), indent=2)
 
 @mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': True})
 def dbg_get_registers(tid: Optional[int] = None, include_all: bool = False) -> str:
@@ -1210,7 +1318,216 @@ def select_ida_instance(target: str) -> str:
     """
     return json.dumps(client.select_instance(target), indent=2)
 
+# ─── Extended Type, Structure & Enum Tools ───────────────────────────────────
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def get_enum(name: str) -> str:
+    """Get detailed enumeration members and constant values by enum name."""
+    return json.dumps(_get(f"/api/enum/{_component(name)}"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
+def create_enum(name: str, width: int = 4) -> str:
+    """Create a new enumeration in the IDA database (width: 1, 2, 4, or 8 bytes)."""
+    return json.dumps(_post("/api/enum/create", {"name": name, "width": width}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
+def add_enum_member(enum_name: str, member: str, value: int = 0) -> str:
+    """Add a named constant member to an existing enumeration."""
+    return json.dumps(_post("/api/enum/add-member", {"enum": enum_name, "member": member, "value": value}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def delete_enum(name: str) -> str:
+    """Delete an enumeration from the IDA database."""
+    return json.dumps(_post("/api/delete-enum", {"name": name}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
+def add_struct_member(
+    struct_name: str,
+    member: str,
+    offset: int = -1,
+    size: int = 4,
+    type_str: Optional[str] = None,
+) -> str:
+    """Add a field/member to an existing structure or union."""
+    payload = {"struct": struct_name, "member": member, "offset": offset, "size": size}
+    if type_str is not None:
+        payload["type"] = type_str
+    return json.dumps(_post("/api/struct/add-member", payload), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def delete_struct(name: str) -> str:
+    """Delete a structure or union by name."""
+    return json.dumps(_post("/api/delete-struct", {"name": name}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def apply_struct(ea: str, struct_name: str) -> str:
+    """Apply a structure layout at a data address in the binary."""
+    return json.dumps(_post("/api/apply-struct", {"ea": ea, "struct": struct_name}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def delete_type(name: str) -> str:
+    """Delete a local type from IDA's type library."""
+    return json.dumps(_post("/api/type/delete", {"name": name}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def list_type_libraries() -> str:
+    """List loaded IDA type libraries (.til)."""
+    return json.dumps(_get("/api/type-libraries"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def load_type_library(name: str) -> str:
+    """Load an IDA type library (.til) by name (e.g. 'mssdk64_win10', 'gnulnx_x64')."""
+    return json.dumps(_post("/api/type-library/load", {"name": name}), indent=2)
+
+# ─── Code, Data, Function & Analysis Control Tools ───────────────────────────
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def make_function(ea: str) -> str:
+    """Define a function starting at the given address."""
+    return json.dumps(_post("/api/make-func", {"ea": ea}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def delete_function(ea: str) -> str:
+    """Delete the function definition at the given address."""
+    return json.dumps(_post("/api/delete-func", {"ea": ea}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def make_code(ea: str, size: int = 0) -> str:
+    """Convert raw bytes at address into disassembled instructions."""
+    return json.dumps(_post("/api/make-code", {"ea": ea, "size": size}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def make_data(ea: str, size: int = 4) -> str:
+    """Convert bytes at address into typed data items (1, 2, 4, or 8 bytes)."""
+    return json.dumps(_post("/api/make-data", {"ea": ea, "size": size}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def undefine(ea: str, size: int = 1) -> str:
+    """Undefine code or data items across an address range."""
+    return json.dumps(_post("/api/undefine", {"ea": ea, "size": size}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def set_name(ea: str, name: str) -> str:
+    """Set or clear a symbol/label name at any code or data address."""
+    return json.dumps(_post("/api/set-name", {"ea": ea, "name": name}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def reanalyze(start_ea: str, end_ea: str) -> str:
+    """Trigger IDA auto-analysis across `[start_ea, end_ea)` and wait for completion."""
+    return json.dumps(_post("/api/reanalyze", {"start": start_ea, "end": end_ea}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def wait_for_analysis() -> str:
+    """Wait until IDA's background auto-analyzer queue becomes idle."""
+    return json.dumps(_get("/api/wait-analysis"), indent=2)
+
+# ─── Deep Inspection, Metadata, Bookmarks, UI & Segment Tools ────────────────
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def get_global_vars() -> str:
+    """List global data variables in non-executable segments."""
+    return json.dumps(_get("/api/global-vars"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def get_stack_vars(ea: str) -> str:
+    """Get stack frame variables, offsets, sizes, and types for a function."""
+    return json.dumps(_get(f"/api/function/{_component(ea)}/stack-vars"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def get_switch_info(ea: str) -> str:
+    """Inspect switch/jump-table cases and target addresses at an indirect jump instruction."""
+    return json.dumps(_get(f"/api/function/{_component(ea)}/switch"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def get_instruction(ea: str) -> str:
+    """Decode a single machine instruction with mnemonic, size, and structured operands."""
+    return json.dumps(_get(f"/api/insn/{_component(ea)}"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def list_patches() -> str:
+    """List all patched bytes in the current IDA database."""
+    return json.dumps(_get("/api/patches"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def list_function_gaps() -> str:
+    """Find unanalyzed or non-function gaps between defined functions."""
+    return json.dumps(_get("/api/gaps"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def list_bookmarks() -> str:
+    """List all marked positions (bookmarks) in the IDA database."""
+    return json.dumps(_get("/api/bookmarks"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'idempotentHint': False, 'openWorldHint': False})
+def add_bookmark(ea: str, description: str = "", slot: int = -1) -> str:
+    """Add a bookmark at the given address (auto-selecting a free slot when slot=-1)."""
+    return json.dumps(_post("/api/add-bookmark", {"ea": ea, "description": description, "slot": slot}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def delete_bookmark(slot: int) -> str:
+    """Delete an IDA bookmark by slot index."""
+    return json.dumps(_post("/api/delete-bookmark", {"slot": slot}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def get_cursor() -> str:
+    """Get the current IDA GUI cursor address (`here()`)."""
+    return json.dumps(_get("/api/cursor"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def get_selection() -> str:
+    """Get the currently selected address range in the IDA GUI."""
+    return json.dumps(_get("/api/selection"), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': False, 'openWorldHint': False})
+def create_segment(
+    start_ea: str,
+    end_ea: str,
+    name: str = "seg",
+    seg_class: str = "DATA",
+    bitness: int = 2,
+) -> str:
+    """Create a new memory segment (`bitness`: 0=16-bit, 1=32-bit, 2=64-bit)."""
+    return json.dumps(_post("/api/segment/create", {
+        "start": start_ea,
+        "end": end_ea,
+        "name": name,
+        "class": seg_class,
+        "bitness": bitness,
+    }), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def delete_segment(ea: str) -> str:
+    """Delete the memory segment containing `ea`."""
+    return json.dumps(_post("/api/segment/delete", {"ea": ea}), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False})
+def set_segment_attrs(
+    ea: str,
+    name: Optional[str] = None,
+    seg_class: Optional[str] = None,
+    perm: Optional[str] = None,
+) -> str:
+    """Modify segment attributes (`name`, `seg_class` e.g. 'CODE'/'DATA'/'CONST', `perm` e.g. 'r-x'/'rw-')."""
+    payload: dict = {"ea": ea}
+    if name is not None:
+        payload["name"] = name
+    if seg_class is not None:
+        payload["class"] = seg_class
+    if perm is not None:
+        payload["perm"] = perm
+    return json.dumps(_post("/api/segment/set-attrs", payload), indent=2)
+
+@mcp.tool(annotations={'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False})
+def analyze_function_context(ea: str) -> str:
+    """Fetch complete combined analysis context for a function in one call (pseudocode, local vars, callers, callees, strings, xrefs, basic blocks)."""
+    return json.dumps(_get("/api/macro/analyze_context", ea=ea), indent=2)
+
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+
+def main() -> None:
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

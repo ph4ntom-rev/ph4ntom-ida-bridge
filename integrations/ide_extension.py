@@ -81,11 +81,13 @@ class IDEBridge:
             return {"online": False, "error": ping["error"]}
 
         info = self.client.info()
+        proc = info.get("processor") or info.get("proc") or "?"
+        bits = info.get("bitness") or info.get("bits") or "?"
         return {
             "online": True,
             "version": ping.get("version"),
-            "binary": info.get("file"),
-            "arch": f"{info.get('proc', '?')} {info.get('bits', '?')}-bit",
+            "binary": info.get("filename") or info.get("file"),
+            "arch": f"{proc} {bits}-bit",
             "entry": info.get("entry_point"),
             "functions": info.get("func_count"),
         }
@@ -96,19 +98,19 @@ class IDEBridge:
 
     def get_decompilation(self, ea: str) -> dict:
         """Get decompiled pseudocode for IDE editor."""
-        return self.client.get(f"/api/function/{ea}/pseudocode")
+        return self.client.get(f"/api/function/{self.client.path_component(ea)}/pseudocode")
 
     def get_xrefs(self, ea: str) -> dict:
         """Get cross-references for IDE panel."""
-        return self.client.get(f"/api/function/{ea}/xrefs-to")
+        return self.client.get(f"/api/function/{self.client.path_component(ea)}/xrefs-to")
 
     def rename_function(self, ea: str, name: str) -> dict:
         """Sync function rename from IDE to IDA."""
-        return self.client.post(f"/api/function/{ea}/rename", {"name": name})
+        return self.client.post(f"/api/function/{self.client.path_component(ea)}/rename", {"name": name})
 
     def set_comment(self, ea: str, comment: str) -> dict:
         """Sync comment from IDE to IDA."""
-        return self.client.post(f"/api/function/{ea}/comment", {"comment": comment})
+        return self.client.post(f"/api/function/{self.client.path_component(ea)}/comment", {"comment": comment})
 
 
 # ── VS Code / ph4ntom IDE settings templates ─────────────────────────

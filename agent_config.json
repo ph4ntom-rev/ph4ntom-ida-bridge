@@ -1,6 +1,6 @@
 {
   "name": "ph4ntom IDA Bridge",
-  "version": "6.3.0",
+  "version": "6.4.0",
   "description": "AI agent interface to IDA Pro 9.5+ reverse engineering and dynamic debugging environment",
   "bridge_url": "http://127.0.0.1:13370",
   "auth": {
@@ -11,13 +11,14 @@
 
   "integration_modes": {
     "ide_agent": {
-      "description": "For AI IDE agents (ph4ntom IDE, Cursor, Windsurf). The IDE agent reads this config and calls cli.py via shell commands.",
+      "description": "For AI IDE agents (Antigravity, Cursor, Windsurf, Claude Code). Includes portable SKILL.md + references in .agents/skills/ida-pro/.",
       "tool": "cli.py",
-      "skill_file": "AGENT_SKILL.md",
+      "skill_file": ".agents/skills/ida-pro/SKILL.md",
+      "legacy_skill_file": "AGENT_SKILL.md",
       "usage": "python cli.py <command> [args]"
     },
     "mcp_server": {
-      "description": "For MCP-compatible clients (Claude Desktop, Cursor, Cline, Antigravity). Exposes 90 native MCP tools.",
+      "description": "For MCP-compatible clients (Claude Desktop, Cursor, Cline, Antigravity). Exposes 131 native MCP tools.",
       "entry": "mcp_server.py",
       "config_claude": {"command": "python", "args": ["mcp_server.py"]},
       "config_cursor": {"command": "python", "args": ["mcp_server.py"]}
@@ -42,8 +43,8 @@
     "body": {"script": "<python code>"},
     "available_modules": [
       "idc", "idaapi", "idautils", "ida_funcs", "ida_bytes", "ida_name",
-      "ida_hexrays", "ida_struct", "ida_enum", "ida_typeinf", "ida_segment",
-      "ida_dbg", "ida_kernwin", "ida_nalt", "ida_ua", "ida_auto",
+      "ida_hexrays", "ida_typeinf", "ida_segment", "ida_segregs",
+      "ida_dbg", "ida_idd", "ida_kernwin", "ida_nalt", "ida_ua", "ida_auto",
       "ida_search", "ida_lines", "ida_xref", "ida_frame", "ida_ida"
     ],
     "return_data": "Place results in the global 'result' dict: result['key'] = value",

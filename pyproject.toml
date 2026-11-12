@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ph4ntom-ida-bridge"
-version = "6.3.0"
+version = "6.4.0"
 description = "Local REST, CLI, MCP, and agent bridge for IDA Pro 9.5+"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["fastmcp>=3,<4"]
+mcp = ["fastmcp>=3,<5"]
 agents = [
   "anthropic>=0.40",
   "google-genai>=1",
@@ -26,12 +26,19 @@ dev = ["flake8>=7,<8", "pytest>=8,<10"]
 
 [project.scripts]
 ph4ntom-ida = "cli:main"
+ph4ntom-mcp = "mcp_server:main"
 
 [tool.setuptools]
 py-modules = ["agent", "cli", "mcp_server", "server", "swarm_worker"]
 
 [tool.setuptools.data-files]
 "share/ph4ntom-ida-bridge" = ["AGENT_SKILL.md", "agent_config.json", "api_schema.json"]
+"share/ph4ntom-ida-bridge/skills/ida-pro" = [".agents/skills/ida-pro/SKILL.md"]
+"share/ph4ntom-ida-bridge/skills/ida-pro/references" = [
+  ".agents/skills/ida-pro/references/idapython-95-sdk.md",
+  ".agents/skills/ida-pro/references/firmware-types-and-vtables.md",
+  ".agents/skills/ida-pro/references/debugging-microcode-and-batch.md",
+]
 
 [tool.setuptools.packages.find]
 include = ["core*", "ida_plugin*", "integrations*"]
